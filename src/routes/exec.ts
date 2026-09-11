@@ -150,7 +150,7 @@ execRouter.post("/:sessionId/write", async (req, res) => {
   const { sessionId } = req.params;
   if (!validateSessionId(sessionId, res)) return;
 
-  const { path: filePath, content, mode } = req.body;
+  const { path: filePath, content, mode, template } = req.body;
 
   if (!filePath || typeof filePath !== "string" || content === undefined || typeof content !== "string") {
     return res.status(400).json({ error: "path and content must be strings" });
@@ -161,6 +161,9 @@ execRouter.post("/:sessionId/write", async (req, res) => {
   if (content.length > 10 * 1024 * 1024) {
     return res.status(400).json({ error: "content exceeds maximum allowed size of 10MB" });
   }
+  if (template !== undefined && (typeof template !== "string" || template.length > 64)) {
+    return res.status(400).json({ error: "template must be a string up to 64 characters" });
+  }
 
   try {
     const contentBase64 = Buffer.from(content, "utf8").toString("base64");
@@ -169,7 +172,7 @@ execRouter.post("/:sessionId/write", async (req, res) => {
       { type: "write_file", path: filePath, content: contentBase64, mode },
       undefined,
       60000,
-      undefined,
+      template,
       req.apiKey?.id,
     );
     res.json(result.data);

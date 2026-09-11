@@ -134,11 +134,12 @@ Internet
 
 ### Environment Templates
 
-Agent Sandbox comes with three pre-configured templates:
+Agent Sandbox comes with four pre-configured templates:
 
 * **`node`** (Default): Alpine Linux 3.20 + Node.js 22 + npm + git + curl
 * **`python`**: Alpine Linux 3.20 + Python 3.12 + pip + git + curl
 * **`go`**: Alpine Linux 3.20 + Go 1.23 + git + curl
+* **`browser`**: Alpine Linux 3.20 + Chromium + Playwright (`playwright-core`) — for agents that browse the live web
 
 #### Building & Creating Custom Templates
 
@@ -168,6 +169,138 @@ Build the snapshot:
 ```bash
 sudo ./templates/build.sh data-science
 ```
+
+Custom templates run under three constraints worth designing around:
+
+* **The guest root filesystem is read-only.** Anything the runtime needs to write — caches, profiles, lock files — must live under `/workspace` or `/tmp`, both tmpfs. Warm any build-time cache (`fc-cache`, bytecode, package indexes) during `docker build`.
+* **Dockerfile `ENV` does not reach the guest.** `build.sh` ships the filesystem with `docker export`, which carries no image config. Write runtime variables to `/etc/environment`, which `start.sh` sources at boot.
+* **`docker export` carries no device nodes.** `start.sh` mounts `/proc`, `/sys`, `devtmpfs` on `/dev`, `devpts`, and `/dev/shm` at boot so the guest has a working environment.
+
+Editing `minimal-rootfs/start.sh` or `templates/base/Dockerfile` changes the shared base image, so **every** template must be rebuilt for the change to take effect — existing snapshots keep the old boot script.
+
+#### Building the Browser Template
+
+The `browser` template needs far more RAM, CPU, and disk than the language templates. Those values are read from the environment at build time and baked into the template's `template.json`, so the server applies them per-session at restore. No global configuration change is needed, and the other templates keep their tight defaults.
+
+```bash
+sudo -E env \
+  ROOTFS_SIZE=2048 \
+  VM_VCPU_COUNT=2 \
+  VM_MEM_SIZE_MIB=1024 \
+  VM_MEMORY_LIMIT_BYTES=1610612736 \
+  VM_CPU_QUOTA_US=200000 \
+  VM_NOFILE_LIMIT=8192 \
+  VM_PIDS_LIMIT=512 \
+  ./templates/build.sh browser
+```
+
+> [!IMPORTANT]
+> `sudo -E` is required. Without `-E`, sudo resets the environment and the snapshot is baked with the 128 MiB / 1 vCPU defaults; the microVM still boots, but Chromium is killed by the host cgroup on the first page load.
+
+> [!NOTE]
+> If Node.js is installed through nvm, fnm, or volta, it lives under your home directory and sudo's `secure_path` hides it. `build.sh` probes those locations automatically; if it still cannot find an interpreter, pass one explicitly with `NODE_BIN="$(command -v node)"` in the same `env` list.
+
+Chromium is the Alpine system package, not a Playwright-managed download — Playwright's bundled browser builds are glibc-only and will not run on musl. Drive it through `playwright-core` with an explicit executable path:
+
+```js
+const { chromium } = require("playwright-core");
+
+const browser = await chromium.launch({
+  executablePath: "/usr/bin/chromium-browser",
+  args: ["--no-sandbox", "--disable-dev-shm-usage"],
+});
+```
+
+`--no-sandbox` is appropriate here: Chromium's own sandbox is redundant inside a Firecracker microVM, which is already the isolation boundary. `--disable-dev-shm-usage` is optional — `start.sh` mounts a 256 MiB tmpfs on `/dev/shm` — but keeping it moves Chromium's shared memory to `/tmp` and costs nothing.
+
+Do **not** pass `--user-data-dir` to `launch()` — Playwright rejects it and directs you to `launchPersistentContext(userDataDir, options)`. Playwright creates its own profile under `/tmp`, which is tmpfs and writable; the read-only root filesystem is not a problem here.
+
+#### Browser Template: End-to-End Test
+
+With the template built and the server running, this sequence navigates a page and returns a screenshot.
+
+**1. Write the script.** Screenshots have to be base64-encoded inside the guest — see the warning below.
+
+```bash
+cat > /tmp/shot.js <<'EOF'
+const fs = require("fs");
+const { chromium } = require("playwright-core");
+
+(async () => {
+  const browser = await chromium.launch({
+    executablePath: "/usr/bin/chromium-browser",
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+  });
+  const page = await browser.newPage();
+  await page.goto("https://example.com", { waitUntil: "domcontentloaded" });
+  console.log("title:", await page.title());
+  const shot = await page.screenshot({ fullPage: true });
+  fs.writeFileSync("/workspace/shot.png.b64", shot.toString("base64"));
+  console.log("bytes:", shot.length);
+  await browser.close();
+})();
+EOF
+```
+
+**2. Upload it, naming the template.** This call provisions the microVM, so the `template` field belongs here — see the session-binding note in the REST API section.
+
+```bash
+curl -s -X POST http://localhost:3000/exec/browse-1/write \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d "$(jq -Rs '{path:"shot.js", template:"browser", content:.}' < /tmp/shot.js)"
+# {"bytesWritten":604}
+```
+
+**3. Run it.**
+
+```bash
+curl -s -X POST http://localhost:3000/exec/browse-1/execute \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"template":"browser","command":"node","args":["shot.js"],"timeout":120000}'
+# {"exitCode":0,"duration":3350,"output":[{"stream":"stdout","data":"title: Example Domain\n"},...]}
+```
+
+**4. Retrieve the screenshot.**
+
+```bash
+curl -s -H "Authorization: Bearer $KEY" \
+  "http://localhost:3000/exec/browse-1/read?path=shot.png.b64" \
+  | jq -r .content | base64 -d > /tmp/shot.png
+
+file /tmp/shot.png
+# /tmp/shot.png: PNG image data, 1280 x 720, 8-bit/color RGB, non-interlaced
+```
+
+**5. Release the session** — a browser session holds 1.5 GiB of host cgroup budget until it is destroyed or idle-reaped.
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $KEY" http://localhost:3000/exec/browse-1
+```
+
+Launch, navigation, and screenshot together take roughly 3.3 seconds, since every `execute` starts Chromium from scratch. For a navigate/click/extract loop, keep a browser alive with `launchServer` rather than paying that per step.
+
+> [!WARNING]
+> The `read` endpoint is **text-only**. The guest returns file contents as base64, but the HTTP layer decodes them to UTF-8 before responding, which corrupts binary data. To retrieve a screenshot, base64-encode it inside the guest and read the resulting text file:
+>
+> ```js
+> const shot = await page.screenshot();
+> require("fs").writeFileSync("/workspace/shot.png.b64", shot.toString("base64"));
+> ```
+>
+> Then `GET /exec/<id>/read?path=shot.png.b64` and `base64 -d` on the host.
+
+> [!NOTE]
+> Restoring a 1 GiB memory snapshot faults pages in on demand, so the `browser` template does not hit the sub-100ms cold start documented for the language templates. Expect tens of milliseconds.
+
+##### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `Cannot find module 'playwright-core'` | The session was provisioned from another template. `write` without a `template` field pins the session to the default `node`. Use a fresh session id. |
+| Chromium exits with `SIGTRAP` right after launch | The guest is missing `/proc` or `/dev`. Check with `{"command":"sh","args":["-c","mount"]}`; rebuild the template if `start.sh` predates the pseudo-filesystem mounts. |
+| `browserType.launch: ... Pass userDataDir parameter` | `--user-data-dir` was passed to `launch()`. Remove it. |
+| VM dies mid-run, no Chromium error | Host cgroup OOM. Confirm `resources.memoryLimitBytes` in `template.json` is the value you built with. |
+| Screenshot file is not a PNG | It was read through the text-only `read` endpoint without base64-encoding in the guest first. |
 
 ---
 
@@ -232,25 +365,56 @@ sudo chmod 750 /var/lib/agent-sandbox/artifacts
 ### 4. Build Templates & Start the Server
 
 ```bash
-# Build base Node.js template snapshot
+# Compile once as your own user, so dist/ is not left root-owned
+npm run build
+
+# Build the base Node.js template snapshot
 sudo ./templates/build.sh node
+
+# Create an API key. Authentication is on by default, and the key store is
+# root-owned, so this must run as root and with the server stopped.
+sudo "$(command -v node)" dist/auth/cli.js create "local-dev"
 
 # Start the server (requires root for Jailer and netns configuration)
 sudo npm start
 # Server listening on http://localhost:3000
 ```
 
+> [!NOTE]
+> `sudo npm start` fails with `npm: command not found` when Node.js is installed through nvm, fnm, or volta: sudo replaces `PATH` with `secure_path`, which excludes your home directory. Build as yourself, then start with an absolute interpreter:
+>
+> ```bash
+> npm run build
+> sudo "$(command -v node)" dist/server.js
+> ```
+>
+> Pass configuration on that same command line — `sudo "$(command -v node)" --env-file=.env dist/server.js`, or inline as `sudo VM_DNS_MODE=allow "$(command -v node)" dist/server.js`.
+
 ### 5. Verify Installation
 
+`/health` and `/ready` are unauthenticated; everything under `/exec` requires a key with the `exec` scope.
+
 ```bash
+export KEY=sk_test_...   # printed by the create command in step 4
+
 # Health probe
 curl http://localhost:3000/health
+# {"status":"ok",...}
+
+# Confirm the template registry loaded
+curl -s -H "Authorization: Bearer $KEY" http://localhost:3000/exec/templates | jq
 
 # Execute a command in a fresh microVM
-curl -X POST http://localhost:3000/exec/test-session/execute \
+curl -s -X POST http://localhost:3000/exec/test-session/execute \
+  -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"command": "node", "args": ["-e", "console.log(process.version)"]}'
+  -d '{"command": "node", "args": ["-e", "console.log(process.version)"]}' | jq
+
+# Release it
+curl -s -X DELETE -H "Authorization: Bearer $KEY" http://localhost:3000/exec/test-session
 ```
+
+If `/exec/templates` returns `Invalid API key`, the key is not in the store the running server loaded — see the key management section. If it returns an empty list, no template registered; start the server with `LOG_LEVEL=info` and look for `skipping invalid template directory`.
 
 ---
 
@@ -350,13 +514,13 @@ curl -X POST http://localhost:3000/exec/session-1/execute \
   -H "Content-Type: application/json" \
   -d '{"command": "npm", "args": ["install", "express"]}'
 
-# Write a file to /workspace
+# Write a file to /workspace (accepts an optional template, like execute)
 curl -X POST http://localhost:3000/exec/session-1/write \
   -H "Authorization: Bearer sk_test_..." \
   -H "Content-Type: application/json" \
-  -d '{"path": "hello.txt", "content": "Hello World"}'
+  -d '{"path": "hello.txt", "content": "Hello World", "template": "node"}'
 
-# Read a file from /workspace
+# Read a file from /workspace (text only — see below)
 curl -H "Authorization: Bearer sk_test_..." \
   "http://localhost:3000/exec/session-1/read?path=hello.txt"
 
@@ -369,6 +533,12 @@ curl -X DELETE -H "Authorization: Bearer sk_test_..." \
   http://localhost:3000/exec/session-1
 ```
 
+> [!IMPORTANT]
+> **A session's template is fixed by the first request that touches it.** Whichever call provisions the microVM — commonly `write`, not `execute` — determines the environment, and `template` on later requests against a live session is ignored. Writing a file and then executing with `"template": "browser"` runs on whatever the write created. Pass `template` on the first call, or use a fresh session id.
+
+> [!WARNING]
+> `read` returns **text only**. The guest encodes file contents as base64, but the endpoint decodes to UTF-8 before responding, so binary files come back corrupted. Base64-encode inside the guest and read the resulting text file instead.
+
 ### Authentication & API Key Management
 
 Agent Sandbox includes a built-in scoped API key manager with per-key rate limiting.
@@ -376,7 +546,20 @@ Agent Sandbox includes a built-in scoped API key manager with per-key rate limit
 > [!NOTE]
 > In accordance with OWASP security practices, API keys are accepted exclusively via HTTP headers (`Authorization: Bearer <key>` or `X-API-Key: <key>`). Query-string authentication is rejected to prevent credentials leaking into access logs.
 
-Manage keys via the CLI:
+Manage keys via the CLI. Keys are stored at `AUTH_KEYS_PATH` (default `/var/lib/agent-sandbox/keys.json`), which is root-owned, so key creation must run as root:
+
+```bash
+npm run build
+sudo "$(command -v node)" dist/auth/cli.js create "agent-key"
+```
+
+> [!WARNING]
+> Running `npm run keys create` as an unprivileged user appears to succeed and prints a key, but the write silently fails: `saveKeys` catches the permission error and logs it at `warn`, which is suppressed by the default `silent` log level. Always create keys as root, then confirm with `npm run keys list`.
+
+> [!IMPORTANT]
+> Stop the server before creating keys, and restart it afterwards. The key store is loaded into memory once per process and never re-read, so a running server will reject keys created after it started. It also periodically persists its own in-memory copy when authenticated requests arrive, which can overwrite keys added by another process in the meantime.
+
+Other operations:
 
 ```bash
 # Generate a key with 'exec' scope
@@ -484,12 +667,12 @@ An automated microsecond-accurate benchmark harness (`npm run bench`) profiles e
 
 ## Configuration
 
-Configure Agent Sandbox through environment variables (or an `.env` file):
+Configure Agent Sandbox through environment variables. The server reads `process.env` directly and does **not** load `.env` on its own — `example.env` is a reference to copy from. To load a file, pass Node's `--env-file` flag: `node --env-file=.env dist/server.js`.
 
 | Environment Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3000` | HTTP server port. |
-| `LOG_LEVEL` | `debug` | Structured logger level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`). |
+| `LOG_LEVEL` | `silent` | Structured logger level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`). Logging is off unless set; raise it to `info` or `debug` to diagnose startup and VM issues. |
 | `AUTH_ENABLED` | `true` | Enforce API key authentication. |
 | `AUTH_KEYS_PATH` | `/var/lib/agent-sandbox/keys.json` | Persistent storage path for API keys. |
 | `AUTH_KEY_PREFIX` | `sk_test_` | Prefix assigned to newly generated API keys. |
@@ -505,6 +688,7 @@ Configure Agent Sandbox through environment variables (or an `.env` file):
 | `VM_CPU_PERIOD_US` | `100000` | Cgroups v2 CPU bandwidth period in microseconds. |
 | `VM_MEMORY_LIMIT_BYTES` | `134217728` | Host-side cgroup memory limit (128 MiB). |
 | `VM_PIDS_LIMIT` | `256` | Maximum process count inside the jail cgroup (fork-bomb protection). |
+| *(per-template)* | — | A template may override any of the `VM_*` resource values above via the `resources` object in its `template.json`, written at build time. Template values take precedence over the server environment. |
 | `VM_NOFILE_LIMIT` | `1024` | Maximum file descriptors per microVM process. |
 | `STRICT_PERMISSIONS` | `false` | Fail fast on chmod/chown errors (automatically enabled in production). |
 | `VM_DNS_MODE` | `none` | DNS filtering mode (`none`, `allow`, `deny`). |

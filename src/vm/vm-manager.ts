@@ -54,15 +54,25 @@ export async function createVm(
   const resolveName = resolveTemplateName(templateName)
   const template = getTemplate(resolveName)!
 
-  const mergedResources = {
-    ...resources,
-    ...(template.manifest.resources?.memSizeMib
-      ? { memSizeMib: template.manifest.resources.memSizeMib }
-      : {}),
-    ...(template.manifest.resources?.vcpuCount
-      ? { vcpuCount: template.manifest.resources.vcpuCount }
-      : {}),
-  };
+  // Per-template resource overrides win over the server environment, so a heavy
+  // template (e.g. "browser") gets its own cgroup ceilings without loosening the
+  // defaults for every other template on the host.
+  const overrides = template.manifest.resources ?? {};
+  const mergedResources: VmResourceConfig = { ...resources };
+  for (const key of [
+    "memSizeMib",
+    "vcpuCount",
+    "cpuQuotaUs",
+    "cpuPeriodUs",
+    "memoryLimitBytes",
+    "noFileSoftLimit",
+    "pidsLimit",
+  ] as const) {
+    const value = overrides[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      mergedResources[key] = value;
+    }
+  }
 
   const start = performance.now();
   let jail: JailPaths | undefined;
@@ -70,7 +80,7 @@ export async function createVm(
   let networkInfo: VmNetworkInfo | undefined;
 
   vmLogger.info(
-    { sessionId, instanceId, templateName, resources, egressPolicy },
+    { sessionId, instanceId, templateName, resources: mergedResources, egressPolicy },
     "creating new VM instance",
   );
   vmCount.inc({ function_id: sessionId, state: "creating" });

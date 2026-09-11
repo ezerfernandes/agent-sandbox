@@ -13,6 +13,11 @@ export interface TemplateManifest {
   resources?: {
     memSizeMib?: number;
     vcpuCount?: number;
+    cpuQuotaUs?: number;
+    cpuPeriodUs?: number;
+    memoryLimitBytes?: number;
+    noFileSoftLimit?: number;
+    pidsLimit?: number;
   };
   createdAt: string;
 }

@@ -199,6 +199,15 @@ async function main() {
     description: `${templateName} environment template`,
     tools: [templateName, "sh"],
     baseImage: "alpine:3.20",
+    resources: {
+      memSizeMib: vmResources.memSizeMib,
+      vcpuCount: vmResources.vcpuCount,
+      cpuQuotaUs: vmResources.cpuQuotaUs,
+      cpuPeriodUs: vmResources.cpuPeriodUs,
+      memoryLimitBytes: vmResources.memoryLimitBytes,
+      noFileSoftLimit: vmResources.noFileSoftLimit,
+      pidsLimit: vmResources.pidsLimit,
+    },
     createdAt: new Date().toISOString(),
   };
   fs.writeFileSync(

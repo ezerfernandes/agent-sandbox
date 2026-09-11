@@ -4,6 +4,8 @@ import {
   revokeKey,
   deleteKey,
   rotateKey,
+  getKeysPath,
+  saveKeys,
   type Scope,
 } from "./key-store.js";
 
@@ -72,6 +74,18 @@ export function runCli(args: string[]): void {
     }
 
     const { record, rawKey } = createKey(name, scopes, rateLimit);
+
+    // createKey swallows write errors, so confirm the record actually reached
+    // disk before telling the user the key is usable.
+    if (!saveKeys()) {
+      console.error(
+        `\n✗ Key was generated but could NOT be written to ${getKeysPath()}.`,
+      );
+      console.error(
+        `  The key above is unusable. Re-run this command as root.\n`,
+      );
+      process.exit(1);
+    }
 
     console.log(`\n✓ API key created successfully!`);
     console.log(`  Name:       ${record.name}`);

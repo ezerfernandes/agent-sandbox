@@ -31,6 +31,10 @@ export function getKeysPath(): string {
 
 let keys: ApiKeyRecord[] = [];
 let loaded = false;
+// Tracks whether this process has made changes that are not yet on disk. Without
+// it, a process holding a stale snapshot (e.g. one that loaded an empty store,
+// then had keys added by the CLI) would overwrite the file on shutdown.
+let dirty = false;
 
 export function loadKeys(): ApiKeyRecord[] {
   const keysPath = getKeysPath();
@@ -48,7 +52,7 @@ export function loadKeys(): ApiKeyRecord[] {
   return keys;
 }
 
-export function saveKeys(): void {
+export function saveKeys(): boolean {
   const keysPath = getKeysPath();
   try {
     const dir = path.dirname(keysPath);
@@ -56,8 +60,11 @@ export function saveKeys(): void {
     const tmp = keysPath + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(keys, null, 2));
     fs.renameSync(tmp, keysPath);
+    dirty = false;
+    return true;
   } catch (err) {
     logger.warn({ err, path: keysPath }, "failed to save API keys");
+    return false;
   }
 }
 
@@ -94,6 +101,7 @@ export function createKey(
   };
 
   keys.push(record);
+  dirty = true;
   saveKeys();
 
   return { record, rawKey };
@@ -124,6 +132,9 @@ export function flushKeys(): void {
     clearTimeout(saveTimer);
     saveTimer = undefined;
   }
+  // Nothing changed here, so the on-disk copy is at least as fresh as ours.
+  // Writing anyway would clobber keys another process added since we loaded.
+  if (!dirty) return;
   saveKeys();
 }
 
@@ -132,6 +143,7 @@ export function touchKey(id: string): void {
   const record = keys.find((k) => k.id === id);
   if (record) {
     record.lastUsedAt = Date.now();
+    dirty = true;
     if (!saveTimer) {
       saveTimer = setTimeout(() => {
         saveTimer = undefined;
@@ -147,6 +159,7 @@ export function revokeKey(id: string): boolean {
   const record = keys.find((k) => k.id === id);
   if (!record) return false;
   record.enabled = false;
+  dirty = true;
   saveKeys();
   return true;
 }
@@ -156,6 +169,7 @@ export function deleteKey(id: string): boolean {
   const initialLength = keys.length;
   keys = keys.filter((k) => k.id !== id);
   if (keys.length !== initialLength) {
+    dirty = true;
     saveKeys();
     return true;
   }
@@ -173,6 +187,7 @@ export function rotateKey(id: string): { record: ApiKeyRecord; rawKey: string } 
   if (!old) return null;
 
   old.enabled = false;
+  dirty = true;
   const newKey = createKey(old.name, old.scopes, old.rateLimit, old.expiresAt);
   saveKeys();
   return newKey;
@@ -181,4 +196,5 @@ export function rotateKey(id: string): { record: ApiKeyRecord; rawKey: string } 
 export function clearKeysStore(): void {
   keys = [];
   loaded = false;
+  dirty = false;
 }

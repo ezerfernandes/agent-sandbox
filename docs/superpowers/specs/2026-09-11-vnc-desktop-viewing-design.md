@@ -1,7 +1,46 @@
 # VNC Desktop Viewing for Browser Sessions
 
 **Date:** 2026-09-11
-**Status:** Approved, not implemented
+**Status:** Superseded by `agent-sandbox-g9h` (webui: upstream agent-sandbox support)
+
+> **Superseded.** This design was produced without knowledge of the `agent-sandbox-g9h`
+> epic in `.beads/`, which covers the same ground in more detail and is partly built
+> already (`g9h.4`, header-only WebSocket auth, is closed and in the tree).
+>
+> **Follow the beads plan, not this document.** Where the two disagree, the beads are
+> right:
+>
+> | Topic | This spec | `agent-sandbox-g9h` |
+> |---|---|---|
+> | WebSocket auth | API key in query string | Header-only Bearer (`g9h.4`, closed). The webui FastAPI backend proxies the socket (`3g0.18`), so the browser never talks to agent-sandbox directly and a header is available. |
+> | Template | extend `templates/browser` | separate `templates/desktop` (`g9h.3`), leaving the headless browser template lean |
+> | X stack | Xvfb + x11vnc, no window manager | Xvnc (tigervnc) + openbox — one process with built-in RFB, and a WM for takeover |
+> | Interaction | view-only | takeover supported (`3g0.17`, `nv3.11`, xdotool in `g9h.3`) |
+> | Route / port | `/vnc/:id/stream`, vsock 5901 | `GET /exec/:id/vnc`, vsock 5900 |
+> | Missing session | 404, never provisions | `ensureSession` provisions |
+> | Binary read | base64-encode inside the guest | `read?encoding=base64` (`g9h.8`) |
+>
+> The beads plan also covers things this spec missed: a per-session connection cap,
+> ping/pong liveness, a 4-hour maximum duration, `touchSession` keepalive (without which
+> a watched session idle-reaps out from under the viewer), a 426 handler for plain GET,
+> and a permanent socket error listener so an unhandled `error` cannot become
+> `process.exit(1)`.
+>
+> **Kept for the record**, because the reasoning behind two rejected options is still
+> useful: why view-only is enforced at the source with `x11vnc -viewonly` rather than by
+> filtering RFB client-side, and what the query-string API key actually costs
+> (`pino-http` logs `req.url`; browser history and `Referer` are unreachable by
+> redaction).
+>
+> **Still valid and now tracked separately**, since the beads did not cover them:
+> `agent-sandbox-6dr` (guest pseudo-filesystem mounts) and `agent-sandbox-n1a`
+> (per-template resources at restore) are both hard blockers on `g9h.3`, plus
+> `agent-sandbox-j87`, `agent-sandbox-z9d` and `agent-sandbox-r6w`.
+>
+> The handshake analysis below — that `src/vm/protocol.ts:52` skips `OK` lines because
+> the JSON protocol is line-framed, so a raw RFB relay must consume that line explicitly
+> — matches what `g9h.5` implements as `openVsockPort`, and is the one piece of this
+> document that proved directly load-bearing.
 
 ## Goal
 

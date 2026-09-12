@@ -305,6 +305,61 @@ describe("Exec REST Routes (/exec/*)", () => {
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
     });
+
+    it("does not expose host internals from the live vm object", async () => {
+      // A real Session carries the Firecracker ChildProcess, its stdio sockets,
+      // the jail paths and the guest's network topology. Serialising it verbatim
+      // shipped all of that to any exec-scoped caller.
+      vi.mocked(getAllSessions).mockReturnValue([
+        {
+          sessionId: "sess-1",
+          createdAt: Date.now(),
+          lastActivityAt: Date.now(),
+          state: "active",
+          template: "node",
+          vm: {
+            id: "vm-1",
+            state: "ready",
+            firecrackerProcess: { pid: 4242, spawnargs: ["--netns", "/var/run/netns/ns-1"] },
+            apiSock: "/var/lib/agent-sandbox/jailer/firecracker/vm-1/root/run/api.socket",
+            vsock: "/var/lib/agent-sandbox/jailer/firecracker/vm-1/root/run/vsock.socket",
+            jailDir: "/var/lib/agent-sandbox/jailer/firecracker/vm-1",
+            networkInfo: { slot: 1, hostIp: "10.0.1.2", guestIp: "192.168.241.2" },
+            socket: { _handle: {} },
+          },
+        } as any,
+      ]);
+
+      const res = await supertest(app).get("/exec/");
+
+      expect(res.status).toBe(200);
+      const [session] = res.body.sessions;
+      expect(session).toEqual({
+        sessionId: "sess-1",
+        createdAt: expect.any(Number),
+        lastActivityAt: expect.any(Number),
+        state: "active",
+        template: "node",
+        vm: { id: "vm-1", state: "ready" },
+      });
+
+      // Belt and braces: nothing anywhere in the payload names a host path, a
+      // pid or an internal address, however the projection is later reshaped.
+      const body = JSON.stringify(res.body);
+      for (const secret of [
+        "firecrackerProcess",
+        "jailDir",
+        "networkInfo",
+        "apiSock",
+        "vsock",
+        "4242",
+        "/var/lib/agent-sandbox",
+        "192.168.241.2",
+        "netns",
+      ]) {
+        expect(body).not.toContain(secret);
+      }
+    });
   });
 
   describe("Security & Error Middleware", () => {

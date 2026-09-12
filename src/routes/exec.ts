@@ -2,6 +2,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { sendSessionMessage, ensureSession, cancelSessionMessage } from "../session/gateway.js";
 import { destroySession, getSession, getAllSessions } from "../session/session.js";
+import type { Session } from "../session/session.js";
 import { listTemplates } from "../vm/templates.js";
 
 const SAFE_SESSION_ID_REGEX = /^[A-Za-z0-9_-]+$/;
@@ -304,10 +305,30 @@ execRouter.delete("/:sessionId", async (req, res) => {
   }
 });
 
+/**
+ * A Session holds a live `vm`: the Firecracker ChildProcess with its pid and
+ * stdio sockets, the jail and vsock paths on the host, and the guest's network
+ * topology. Serialising one verbatim hands all of that to the caller — tens of
+ * kilobytes per session of host pids, filesystem layout and internal addressing,
+ * none of which a client can act on. Project to the fields that describe the
+ * session itself.
+ */
+function summarizeSession(session: Session) {
+  return {
+    sessionId: session.sessionId,
+    ownerId: session.ownerId,
+    createdAt: session.createdAt,
+    lastActivityAt: session.lastActivityAt,
+    state: session.state,
+    template: session.template,
+    vm: session.vm ? { id: session.vm.id, state: session.vm.state } : undefined,
+  };
+}
+
 execRouter.get("/", (req, res) => {
   let sessions = getAllSessions();
   if (req.apiKey && !req.apiKey.scopes.includes("admin")) {
     sessions = sessions.filter((s) => !s.ownerId || s.ownerId === req.apiKey?.id);
   }
-  res.json({ sessions });
+  res.json({ sessions: sessions.map(summarizeSession) });
 });

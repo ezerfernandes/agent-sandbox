@@ -2,6 +2,7 @@ import type { Server } from "http";
 import { getAllSessions, destroySession } from "./session/session.js";
 import { flushKeys } from "./auth/key-store.js";
 import { logger } from "./logger.js";
+import { closeAllVncConnections } from "./routes/vnc.js";
 
 let shutdownInProgress = false;
 
@@ -13,6 +14,9 @@ export function installShutdownHandler(httpServer: Server): void {
     logger.info({ signal }, "graceful shutdown initiated");
 
     httpServer.close();
+    // Upgraded sockets are not tracked by httpServer.close(); without this the
+    // process waits on every open VNC bridge until the 30s force-exit.
+    closeAllVncConnections();
 
     const timer = setTimeout(() => {
       logger.error("graceful shutdown timed out after 30s — forcing exit");

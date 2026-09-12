@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { Request, Response, NextFunction } from "express";
-import { extractKey, authMiddleware } from "./middleware.js";
+import type { IncomingMessage } from "http";
+import { extractKey, authMiddleware, authenticateRequest } from "./middleware.js";
 import * as keyStore from "./key-store.js";
 
 vi.mock("./key-store.js");
@@ -8,9 +9,12 @@ vi.mock("./rate-limiter.js", () => ({
   checkRateLimit: vi.fn(() => true),
 }));
 
+import { checkRateLimit } from "./rate-limiter.js";
+
 describe("auth middleware", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(checkRateLimit).mockReturnValue(true);
     delete process.env.AUTH_ENABLED;
   });
 
@@ -143,6 +147,110 @@ describe("auth middleware", () => {
       expect(res.json).toHaveBeenCalledWith({ error: "Invalid API key" });
       expect(next).not.toHaveBeenCalled();
       delete process.env.MCP_AUTH_TOKEN;
+    });
+  });
+  describe("authenticateRequest", () => {
+    it("returns the resolved key for a valid Bearer token with the required scopes", () => {
+      vi.mocked(keyStore.verifyKey).mockReturnValue({
+        id: "key-1",
+        name: "Test Key",
+        scopes: ["exec", "admin"],
+        rateLimit: 100,
+      });
+
+      const req = {
+        headers: { authorization: "Bearer sk_test_valid" },
+      } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.key?.id).toBe("key-1");
+      expect(keyStore.touchKey).toHaveBeenCalledWith("key-1");
+    });
+
+    it("returns 401 when no Bearer header is present", () => {
+      const req = { headers: {} } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result).toEqual({ ok: false, status: 401, error: "API key required" });
+    });
+
+    it("ignores ?access_token= query parameters (header-only Bearer)", () => {
+      const req = {
+        headers: {},
+        url: "/exec/s1/vnc?access_token=sk_test_query",
+      } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result).toEqual({ ok: false, status: 401, error: "API key required" });
+      expect(keyStore.verifyKey).not.toHaveBeenCalled();
+    });
+
+    it("returns 401 for an unknown key", () => {
+      vi.mocked(keyStore.verifyKey).mockReturnValue(null);
+      const req = {
+        headers: { authorization: "Bearer sk_test_unknown" },
+      } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result).toEqual({ ok: false, status: 401, error: "Invalid API key" });
+    });
+
+    it("returns 403 when a required scope is missing", () => {
+      vi.mocked(keyStore.verifyKey).mockReturnValue({
+        id: "key-2",
+        name: "Exec Only",
+        scopes: ["exec"],
+        rateLimit: 100,
+      });
+      const req = {
+        headers: { authorization: "Bearer sk_test_exec" },
+      } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["admin"]);
+
+      expect(result).toEqual({
+        ok: false,
+        status: 403,
+        error: "Missing required scope: admin",
+      });
+    });
+
+    it("returns 429 with retryAfter when the key is rate limited", () => {
+      vi.mocked(keyStore.verifyKey).mockReturnValue({
+        id: "key-3",
+        name: "Busy Key",
+        scopes: ["exec"],
+        rateLimit: 1,
+      });
+      vi.mocked(checkRateLimit).mockReturnValue(false);
+
+      const req = {
+        headers: { authorization: "Bearer sk_test_busy" },
+      } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result).toEqual({
+        ok: false,
+        status: 429,
+        error: "Rate limit exceeded",
+        retryAfter: 60,
+      });
+    });
+
+    it("short-circuits with a null key when AUTH_ENABLED=false", () => {
+      process.env.AUTH_ENABLED = "false";
+      const req = { headers: {} } as unknown as IncomingMessage;
+
+      const result = authenticateRequest(req, ["exec"]);
+
+      expect(result).toEqual({ ok: true, key: null });
+      expect(keyStore.verifyKey).not.toHaveBeenCalled();
     });
   });
 });

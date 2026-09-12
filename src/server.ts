@@ -3,6 +3,7 @@ import { logger } from "./logger.js";
 import { ensureHostNetworkSetup, recoverUsedSlots } from "./vm/networking.js";
 import { sweepOrphanedResources } from "./vm/orphan-sweep.js";
 import { installShutdownHandler } from "./shutdown.js";
+import { attachVncUpgrade } from "./routes/vnc.js";
 import { vmResourceConfig } from "./metrics.js";
 import { loadResourceConfig } from "./vm/jailer.js";
 import { loadTemplateRegistry, listTemplates } from "./vm/templates.js";
@@ -45,4 +46,9 @@ process.on("unhandledRejection", (reason) => {
 const httpServer = app.listen(PORT, () => {
   logger.info({ port: PORT }, `server listening on http://localhost:${PORT}`);
 });
+
+// WebSocket upgrades are handled off the raw HTTP server, so `app` stays a
+// plain Express app that supertest can drive without a listening socket.
+attachVncUpgrade(httpServer);
+
 installShutdownHandler(httpServer);

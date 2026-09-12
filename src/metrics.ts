@@ -148,3 +148,16 @@ export const authRateLimitHits = new Counter({
   labelNames: ["key_id"],
   registers: [register],
 });
+
+export const vncConnectionsActive = new Gauge({
+  name: "vnc_connections_active",
+  help: "Currently open VNC WebSocket bridges",
+  registers: [register],
+});
+
+export const vncConnectionsTotal = new Counter({
+  name: "vnc_connections_total",
+  help: "VNC WebSocket upgrade attempts by outcome",
+  labelNames: ["result"],
+  registers: [register],
+});

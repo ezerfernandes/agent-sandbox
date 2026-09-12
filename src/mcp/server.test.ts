@@ -295,6 +295,21 @@ describe("MCP Server Tools", () => {
       expect(textOf(result)).toBe("");
     });
 
+    it("returns raw base64 when encoding=base64 is requested", async () => {
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const content = png.toString("base64");
+      vi.mocked(sendSessionMessage).mockImplementation(
+        mockSendSession({ type: "response", data: { content, size: png.length } }),
+      );
+
+      const result = await client.callTool({
+        name: "read_file",
+        arguments: { sessionId: "s1", path: "shot.png", encoding: "base64" },
+      });
+
+      expect(textOf(result)).toBe(content);
+    });
+
     it("sends read_file message with correct path", async () => {
       vi.mocked(sendSessionMessage).mockImplementation(
         mockSendSession({ type: "response", data: { content: "" } }),

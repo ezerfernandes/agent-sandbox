@@ -29,6 +29,7 @@ export class Session {
       env: opts.env,
       timeout: opts.timeout ?? this._defaultTimeout,
       template: this._template,
+      messageId: opts.messageId,
     };
 
     const res = await this._request("POST", `/${this.id}/execute`, body);
@@ -46,6 +47,7 @@ export class Session {
       env: opts.env,
       timeout: opts.timeout ?? this._defaultTimeout,
       template: this._template,
+      messageId: opts.messageId,
     };
 
     const url = `${this._baseUrl}/exec/${this.id}/execute?format=ndjson`;
@@ -126,8 +128,19 @@ export class Session {
     return this._request("POST", `/${this.id}/write`, { path, content }) as Promise<WriteResult>;
   }
 
-  async readFile(path: string): Promise<ReadResult> {
-    return this._request("GET", `/${this.id}/read?path=${encodeURIComponent(path)}`) as Promise<ReadResult>;
+  /**
+   * Read a file from the session workspace.
+   *
+   * `encoding: "base64"` returns the guest payload untouched — use it for
+   * binary files (screenshots, archives); the default utf8 decode corrupts them.
+   */
+  async readFile(
+    path: string,
+    opts: { encoding?: "utf8" | "base64" } = {},
+  ): Promise<ReadResult> {
+    const params = new URLSearchParams({ path });
+    if (opts.encoding) params.set("encoding", opts.encoding);
+    return this._request("GET", `/${this.id}/read?${params}`) as Promise<ReadResult>;
   }
 
   async listFiles(
@@ -137,6 +150,17 @@ export class Session {
     const params = new URLSearchParams({ path });
     if (opts.recursive) params.set("recursive", "true");
     return this._request("GET", `/${this.id}/files?${params}`) as Promise<ListFilesResult>;
+  }
+
+  /**
+   * Stop a running execution. The guest gets a SIGTERM (SIGKILL after 5s); the
+   * outcome surfaces on the original `exec`/`execStream` call, not here.
+   *
+   * Returns immediately (202 from the sandbox) — cancelling an execution that
+   * has already finished is a no-op.
+   */
+  async cancel(messageId: string): Promise<void> {
+    await this._request("POST", `/${this.id}/cancel`, { messageId });
   }
 
   async destroy(): Promise<boolean> {

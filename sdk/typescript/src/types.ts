@@ -30,6 +30,12 @@ export interface ExecOptions {
 
   /** Timeout in milliseconds for this execution (overrides client default). */
   timeout?: number;
+
+  /**
+   * Caller-chosen id (8-64 of `[A-Za-z0-9_-]`) for this execution, so it can be
+   * stopped later with {@link Session.cancel}. Generated server-side if omitted.
+   */
+  messageId?: string;
 }
 
 /** A single output chunk from command execution. */
@@ -44,12 +50,16 @@ export interface ExecResult {
   exitCode: number;
   signal?: string;
   duration: number;
+  /** Id of this execution; pass it to {@link Session.cancel} to stop it. */
+  messageId?: string;
   output: OutputChunk[];
 }
 
 /** A streaming chunk emitted during NDJSON execution. */
 export interface StreamChunk {
-  type: "stream" | "result" | "error";
+  type: "started" | "stream" | "result" | "error";
+  /** Present on the leading `started` frame: the id to cancel this execution with. */
+  messageId?: string;
   stream?: "stdout" | "stderr";
   data?: string;
   exitCode?: number;
@@ -66,8 +76,10 @@ export interface WriteResult {
 
 /** Result of reading a file. */
 export interface ReadResult {
+  /** utf8 text, or the raw base64 payload when `encoding: "base64"` was requested. */
   content: string;
   size: number;
+  encoding?: "utf8" | "base64";
 }
 
 /** A file or directory entry. */

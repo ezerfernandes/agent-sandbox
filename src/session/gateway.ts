@@ -114,6 +114,47 @@ export async function ensureSession(
   }
 }
 
+/**
+ * Ask the guest runtime to kill the process started by `messageId`.
+ *
+ * Two deliberate departures from `sendSessionMessage`:
+ * - `getSession`, never `ensureSession`: cancelling a session that has no VM
+ *   must not boot one.
+ * - the frame is written straight to the socket, bypassing `acquireVmLock`.
+ *   The lock is held by the very command being cancelled, which is only
+ *   reading, so a lock-respecting cancel would queue behind the command it is
+ *   supposed to stop.
+ *
+ * Fire-and-forget: the guest answers on the in-flight execute request (as a
+ * SIGTERM exit), not with a reply of its own.
+ */
+export async function cancelSessionMessage(
+  sessionId: string,
+  messageId: string,
+  ownerId?: string,
+): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) {
+    const err = new Error("Session not found");
+    (err as any).statusCode = 404;
+    throw err;
+  }
+
+  assertOwnership(session, ownerId);
+
+  const socket = session.vm?.socket;
+  if (!session.vm || !socket || socket.destroyed) {
+    const err = new Error("Session has no active VM connection");
+    (err as any).statusCode = 404;
+    throw err;
+  }
+
+  socket.write(JSON.stringify({ type: "cancel", id: messageId }) + "\n");
+  touchSession(sessionId);
+
+  sessionLogger.info({ sessionId, messageId }, "cancel sent to VM");
+}
+
 export async function sendSessionMessage(
   sessionId: string,
   message: Record<string, any>,

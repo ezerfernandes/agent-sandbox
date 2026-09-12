@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../session/gateway.js", () => ({
   sendSessionMessage: vi.fn(),
   ensureSession: vi.fn(),
+  cancelSessionMessage: vi.fn(),
 }));
 
 vi.mock("../session/session.js", () => ({
@@ -16,7 +17,7 @@ vi.mock("../session/session.js", () => ({
 
 import supertest from "supertest";
 import { app } from "../app.js";
-import { sendSessionMessage } from "../session/gateway.js";
+import { sendSessionMessage, cancelSessionMessage } from "../session/gateway.js";
 import { destroySession, getAllSessions } from "../session/session.js";
 
 describe("Exec REST Routes (/exec/*)", () => {
@@ -207,6 +208,59 @@ describe("Exec REST Routes (/exec/*)", () => {
       const res = await supertest(app).get("/exec/sess-1/read?path=file.txt");
       expect(res.status).toBe(200);
       expect(res.body.content).toBe("contents of file");
+      expect(res.body.encoding).toBe("utf8");
+    });
+
+    it("returns the guest payload untouched with encoding=base64", async () => {
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      vi.mocked(sendSessionMessage).mockResolvedValue({
+        type: "response",
+        data: { content: png.toString("base64"), size: png.length },
+      });
+
+      const res = await supertest(app).get(
+        "/exec/sess-1/read?path=shot.png&encoding=base64",
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.encoding).toBe("base64");
+      expect(res.body.content).toBe(png.toString("base64"));
+      expect(Buffer.from(res.body.content, "base64").equals(png)).toBe(true);
+    });
+
+    it("accepts an explicit encoding=utf8", async () => {
+      vi.mocked(sendSessionMessage).mockResolvedValue({
+        type: "response",
+        data: { content: Buffer.from("plain text").toString("base64"), size: 10 },
+      });
+
+      const res = await supertest(app).get(
+        "/exec/sess-1/read?path=file.txt&encoding=utf8",
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe("plain text");
+      expect(res.body.encoding).toBe("utf8");
+    });
+
+    it("rejects an unsupported encoding with 400", async () => {
+      const res = await supertest(app).get(
+        "/exec/sess-1/read?path=file.txt&encoding=hex",
+      );
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("encoding must be");
+      expect(sendSessionMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("GET /exec/:sessionId/vnc", () => {
+    it("answers a plain GET with 426 Upgrade Required", async () => {
+      const res = await supertest(app).get("/exec/sess-1/vnc");
+
+      expect(res.status).toBe(426);
+      expect(res.headers.upgrade).toBe("websocket");
+      expect(res.body.error).toContain("WebSocket upgrade");
     });
   });
 
@@ -269,6 +323,113 @@ describe("Exec REST Routes (/exec/*)", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("Malformed JSON payload");
+    });
+  });
+  describe("messageId + POST /exec/:sessionId/cancel", () => {
+    it("passes a caller-supplied messageId to the guest and echoes it back", async () => {
+      vi.mocked(sendSessionMessage).mockResolvedValue({
+        type: "response",
+        data: { exitCode: 0 },
+        messageId: "run-abcdef12",
+      });
+
+      const res = await supertest(app)
+        .post("/exec/sess-1/execute")
+        .send({ command: "sleep", args: ["100"], messageId: "run-abcdef12" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.messageId).toBe("run-abcdef12");
+      const call = vi.mocked(sendSessionMessage).mock.calls[0]!;
+      expect((call[1] as any).id).toBe("run-abcdef12");
+    });
+
+    it("rejects a malformed messageId with 400", async () => {
+      const res = await supertest(app)
+        .post("/exec/sess-1/execute")
+        .send({ command: "echo", messageId: "short" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("messageId");
+      expect(sendSessionMessage).not.toHaveBeenCalled();
+    });
+
+    it("emits a started frame first in NDJSON mode so the caller can cancel", async () => {
+      vi.mocked(sendSessionMessage).mockResolvedValue({
+        type: "response",
+        data: { exitCode: 0 },
+        messageId: "run-abcdef12",
+      });
+
+      const res = await supertest(app)
+        .post("/exec/sess-1/execute?format=ndjson")
+        .send({ command: "sleep", args: ["100"], messageId: "run-abcdef12" });
+
+      expect(res.status).toBe(200);
+      const frames = res.text
+        .trim()
+        .split("\n")
+        .map((line: string) => JSON.parse(line));
+      expect(frames[0]).toEqual({ type: "started", messageId: "run-abcdef12" });
+      expect(frames[frames.length - 1].type).toBe("result");
+    });
+
+    it("generates a messageId for the started frame when the caller omits one", async () => {
+      vi.mocked(sendSessionMessage).mockResolvedValue({
+        type: "response",
+        data: { exitCode: 0 },
+        messageId: "ignored",
+      });
+
+      const res = await supertest(app)
+        .post("/exec/sess-1/execute?format=ndjson")
+        .send({ command: "echo" });
+
+      const frames = res.text
+        .trim()
+        .split("\n")
+        .map((line: string) => JSON.parse(line));
+      expect(frames[0].type).toBe("started");
+      expect(typeof frames[0].messageId).toBe("string");
+      expect(frames[0].messageId.length).toBeGreaterThanOrEqual(8);
+      const call = vi.mocked(sendSessionMessage).mock.calls[0]!;
+      expect((call[1] as any).id).toBe(frames[0].messageId);
+    });
+
+    it("returns 202 after handing the cancel to the guest", async () => {
+      vi.mocked(cancelSessionMessage).mockResolvedValue(undefined);
+
+      const res = await supertest(app)
+        .post("/exec/sess-1/cancel")
+        .send({ messageId: "run-abcdef12" });
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({ cancelled: true, messageId: "run-abcdef12" });
+      expect(cancelSessionMessage).toHaveBeenCalledWith(
+        "sess-1",
+        "run-abcdef12",
+        undefined,
+      );
+    });
+
+    it("rejects a cancel without a valid messageId with 400", async () => {
+      const res = await supertest(app).post("/exec/sess-1/cancel").send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("messageId");
+      expect(cancelSessionMessage).not.toHaveBeenCalled();
+    });
+
+    it("propagates 404 when the session has no live VM", async () => {
+      const err: any = new Error("Session has no active VM connection");
+      err.statusCode = 404;
+      vi.mocked(cancelSessionMessage).mockRejectedValue(err);
+
+      const res = await supertest(app)
+        .post("/exec/sess-1/cancel")
+        .send({ messageId: "run-abcdef12" });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("no active VM");
     });
   });
 });

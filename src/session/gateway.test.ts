@@ -25,9 +25,9 @@ vi.mock("../vm/protocol.js", () => ({
   buildPayload: vi.fn(),
 }));
 
-import { ensureSession, sendSessionMessage } from "./gateway.js";
+import { ensureSession, sendSessionMessage, cancelSessionMessage } from "./gateway.js";
 import { createVm } from "../vm/vm-manager.js";
-import { getVmSocket } from "../vm/transport.js";
+import { getVmSocket, acquireVmLock } from "../vm/transport.js";
 import { readVsockResponse } from "../vm/protocol.js";
 import * as sessionModule from "./session.js";
 import { getSession, createSession } from "./session.js";
@@ -292,5 +292,52 @@ describe("sendSessionMessage", () => {
     const resultVm = await ensureSession("s-dead");
     expect(resultVm).toBe(newVm);
     expect(createVm).toHaveBeenCalled();
+  });
+});
+
+describe("cancelSessionMessage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("writes a cancel frame straight to the VM socket without taking the VM lock", async () => {
+    const { vm } = prePopulateSession("c1");
+    const socket = makeFakeSocket();
+    (vm as any).socket = socket;
+
+    await cancelSessionMessage("c1", "msg-12345678");
+
+    expect(socket.write).toHaveBeenCalledWith(
+      JSON.stringify({ type: "cancel", id: "msg-12345678" }) + "\n",
+    );
+    // The lock holder is the command being cancelled; queueing behind it would
+    // deadlock the cancel until the command it is meant to stop has finished.
+    expect(acquireVmLock).not.toHaveBeenCalled();
+  });
+
+  it("never provisions a VM for an unknown session", async () => {
+    await expect(cancelSessionMessage("no-such-session", "msg-12345678")).rejects.toThrow(
+      /not found/i,
+    );
+    expect(createVm).not.toHaveBeenCalled();
+  });
+
+  it("rejects with 404 when the session has no live VM socket", async () => {
+    prePopulateSession("c2");
+
+    await expect(cancelSessionMessage("c2", "msg-12345678")).rejects.toMatchObject({
+      statusCode: 404,
+    });
+    expect(createVm).not.toHaveBeenCalled();
+  });
+
+  it("rejects with 403 when the caller does not own the session", async () => {
+    const { vm } = prePopulateSession("c3");
+    (vm as any).socket = makeFakeSocket();
+    sessionModule.getSession("c3")!.ownerId = "key-owner";
+
+    await expect(
+      cancelSessionMessage("c3", "msg-12345678", "key-other"),
+    ).rejects.toMatchObject({ statusCode: 403 });
   });
 });

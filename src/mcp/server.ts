@@ -138,8 +138,14 @@ export function createMcpServer(ownerId?: string): McpServer {
     {
       sessionId: z.string(),
       path: z.string().describe("File path relative to /workspace"),
+      encoding: z
+        .enum(["utf8", "base64"])
+        .optional()
+        .describe(
+          "utf8 (default) decodes to text; base64 returns the raw payload, required for binary files such as screenshots",
+        ),
     },
-    async ({ sessionId, path }) => {
+    async ({ sessionId, path, encoding }) => {
       const result = await sendSessionMessage(
         sessionId,
         { type: "read_file", path },
@@ -148,10 +154,9 @@ export function createMcpServer(ownerId?: string): McpServer {
         undefined,
         ownerId,
       );
-      const content = Buffer.from(
-        result.data?.content || "",
-        "base64",
-      ).toString("utf-8");
+      const raw = result.data?.content || "";
+      const content =
+        encoding === "base64" ? raw : Buffer.from(raw, "base64").toString("utf-8");
       return {
         content: [{ type: "text", text: content }],
       };

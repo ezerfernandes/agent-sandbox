@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-sandbox desktop</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #16161a; color: #e6e6e6;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: #1e1e24; border-bottom: 1px solid #2c2c35;
+  }
+  input, button, select {
+    font: inherit; padding: 6px 10px; border-radius: 6px;
+    border: 1px solid #3a3a45; background: #26262e; color: #e6e6e6;
+  }
+  button { cursor: pointer; border-color: #4a4a58; }
+  button:hover:not(:disabled) { background: #32323c; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #2f6f4f; border-color: #3a8a62; }
+  button.primary:hover:not(:disabled) { background: #38835d; }
+  #status { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #777; flex: none; }
+  #dot.on { background: #4ade80; }
+  #dot.err { background: #f87171; }
+  #dot.busy { background: #fbbf24; }
+  #screen { flex: 1; min-height: 0; background: #0d0d10; }
+  #log {
+    max-height: 26vh; overflow: auto; padding: 8px 14px; white-space: pre-wrap;
+    border-top: 1px solid #2c2c35; background: #121216; color: #9aa0aa; font-size: 12px;
+  }
+  #log .err { color: #fca5a5; }
+  #log .ok  { color: #86efac; }
+</style>
+</head>
+<body>
+
+<header>
+  <label for="sid">session</label>
+  <input id="sid" value="desk-1" size="14" autocomplete="off">
+  <button id="boot">Boot desktop</button>
+  <button id="connect" class="primary">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <label><input type="checkbox" id="scale" checked> scale to fit</label>
+  <span id="status"><span id="dot"></span><span id="state">idle</span></span>
+</header>
+
+<div id="screen"></div>
+<div id="log"></div>
+
+<script type="module">
+import RFB from './novnc/core/rfb.js';
+
+const $ = (id) => document.getElementById(id);
+let rfb = null;
+
+function log(msg, cls = '') {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  $('log').append(line);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function state(text, cls) {
+  $('state').textContent = text;
+  $('dot').className = cls || '';
+}
+
+async function boot() {
+  const id = $('sid').value.trim();
+  if (!id) return;
+  $('boot').disabled = true;
+  state('booting VM…', 'busy');
+  log(`booting desktop session "${id}" …`);
+  try {
+    const res = await fetch(`/api/start?session=${encodeURIComponent(id)}`, { method: 'POST' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+    log(`VM ready (${body.duration}ms)`, 'ok');
+    state('booted', '');
+  } catch (err) {
+    log(`boot failed: ${err.message}`, 'err');
+    state('boot failed', 'err');
+  } finally {
+    $('boot').disabled = false;
+  }
+}
+
+function connect() {
+  const id = $('sid').value.trim();
+  if (!id || rfb) return;
+
+  // No credentials in this URL: the viewer process holds the API key and adds
+  // the Authorization header when it dials the sandbox.
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}` +
+              `/websockify?session=${encodeURIComponent(id)}`;
+
+  state('connecting…', 'busy');
+  log(`connecting to ${id} …`);
+
+  rfb = new RFB($('screen'), url, {});
+  rfb.scaleViewport = $('scale').checked;
+  rfb.resizeSession = false;      // the guest's Xvnc geometry is fixed at 1280x800
+  rfb.background = '#0d0d10';
+
+  rfb.addEventListener('connect', () => {
+    state('connected', 'on');
+    log('RFB connected — desktop is live', 'ok');
+    $('connect').disabled = true;
+    $('disconnect').disabled = false;
+  });
+
+  rfb.addEventListener('disconnect', (e) => {
+    state(e.detail.clean ? 'disconnected' : 'connection lost', e.detail.clean ? '' : 'err');
+    log(e.detail.clean ? 'disconnected' : 'connection lost', e.detail.clean ? '' : 'err');
+    rfb = null;
+    $('connect').disabled = false;
+    $('disconnect').disabled = true;
+  });
+
+  rfb.addEventListener('securityfailure', (e) => {
+    log(`security failure: ${e.detail.reason}`, 'err');
+  });
+}
+
+function disconnect() {
+  if (rfb) { rfb.disconnect(); rfb = null; }
+}
+
+$('boot').onclick = boot;
+$('connect').onclick = connect;
+$('disconnect').onclick = disconnect;
+$('scale').onchange = () => { if (rfb) rfb.scaleViewport = $('scale').checked; };
+
+log('ready. "Boot desktop" starts the VM if it is not running, then Connect.');
+</script>
+</body>
+</html>

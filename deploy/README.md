@@ -204,6 +204,27 @@ curl -s -X POST localhost:3000/exec/s1/execute \
 If it genuinely must be reachable, put nginx or a load balancer with TLS in
 front and keep 3000 bound to loopback behind it.
 
+### Watching a desktop session
+
+A browser cannot open `GET /exec/:id/vnc` itself — the `WebSocket` API cannot
+set an `Authorization` header, and that route deliberately refuses a token in
+the query string. Run the viewer on the sandbox host and tunnel to it:
+
+```bash
+cd tools/novnc-viewer && npm install
+SANDBOX_KEY=sk_live_... npm start          # binds 127.0.0.1:6080
+
+# from your workstation
+ssh -N -L 6080:127.0.0.1:6080 user@your-host
+```
+
+Then open <http://localhost:6080>, enter a session id and connect. It needs a
+`desktop`-class template built, or the VNC route answers 502.
+
+The viewer has **no authentication of its own** and holds an API key, so anyone
+who can reach its port drives every desktop session that key can reach. It binds
+loopback for that reason — see [`tools/novnc-viewer/README.md`](../tools/novnc-viewer/README.md).
+
 ---
 
 ## 7. Operating it

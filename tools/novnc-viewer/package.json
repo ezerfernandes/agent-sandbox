@@ -1,0 +1,14 @@
+{
+  "name": "agent-sandbox-novnc-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser viewer for agent-sandbox desktop sessions, bridging noVNC to the authenticated /exec/:id/vnc WebSocket",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.7.0",
+    "ws": "^8.21.3"
+  }
+}

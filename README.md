@@ -599,13 +599,28 @@ curl -X DELETE -H "Authorization: Bearer sk_test_..." \
 
 #### Watching a desktop session (`GET /exec/:id/vnc`)
 
-`desktop` sessions expose their X display as a WebSocket carrying raw RFB, which any noVNC client can render:
+`desktop` sessions expose their X display as a WebSocket carrying raw RFB:
 
 ```bash
 # Bearer header only — an access_token query parameter is deliberately not accepted
 wscat -H "Authorization: Bearer sk_test_..." \
   --connect "ws://localhost:3000/exec/desk-1/vnc?template=desktop"
 # < RFB 003.008
+```
+
+**A browser cannot connect to this endpoint directly.** The `WebSocket` API
+cannot set request headers, and this route reads the `Authorization` header
+only: a token in a URL is written to the access log, kept in browser history and
+sent on in `Referer`, so `?access_token=` is refused by design. Anything that
+can set headers — `wscat`, a Node or Python client, a server-side proxy — works
+as shown above.
+
+To watch a desktop in a browser, run [`tools/novnc-viewer`](tools/novnc-viewer),
+which holds the key and adds the header on the browser's behalf:
+
+```bash
+cd tools/novnc-viewer && npm install
+SANDBOX_KEY=sk_test_... npm start          # http://127.0.0.1:6080
 ```
 
 The handshake is the usual one: `exec` scope, session ownership, and lazy VM provisioning through the same path as `/execute`, so the first connection to a fresh session id boots the desktop. Failures answer before the upgrade — **401**/**403** on auth, **429** past `VNC_MAX_CONNECTIONS_PER_SESSION`, **502** when the guest has no VNC listener (usually: not a `desktop` template), and a plain `GET` without an upgrade gets **426**. While a viewer is attached the session is kept alive against the idle reaper, and a tab that dies without closing the socket is dropped by ping/pong liveness rather than pinning the VM's memory.

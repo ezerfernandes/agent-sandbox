@@ -69,7 +69,16 @@ describe("start.sh boot hooks", () => {
     // bind localhost, so this has to happen first.
     expect(source).toMatch(/ip link set lo up/);
     expect(source).toMatch(/ip addr add 127\.0\.0\.1\/8 dev lo/);
+
+    // Both families. Node resolves "localhost" to ::1 first on a dual-stack
+    // guest, so a v4-only loopback reproduces the original EADDRNOTAVAIL for
+    // anything that binds or dials by name rather than by literal address.
+    expect(source).toMatch(/ip -6 addr add ::1\/128 dev lo/);
+
     expect(source.indexOf("ip link set lo up")).toBeLessThan(
+      source.indexOf("/etc/sandbox/boot.d"),
+    );
+    expect(source.indexOf("ip -6 addr add ::1/128 dev lo")).toBeLessThan(
       source.indexOf("/etc/sandbox/boot.d"),
     );
   });

@@ -24,8 +24,16 @@ mount -t tmpfs -o size=512m,mode=0755 tmpfs /workspace
 # unusable. Anything binding localhost fails with EADDRNOTAVAIL - the desktop
 # template's `Xvnc -localhost` dies with "createTcpListeners: no addresses
 # available", and a debug port or a local daemon would fail the same way.
+#
+# ::1 is set explicitly alongside it. Node resolves "localhost" to ::1 first on a
+# dual-stack guest, so a v4-only loopback leaves `listen(..., "localhost")` and
+# `connect("localhost")` failing exactly as before the fix. The kernel adds ::1
+# by itself only when IPv6 is compiled in and not disabled, which is not
+# something a template's guest kernel guarantees; the `|| true` covers the
+# IPv6-less case.
 ip link set lo up 2>/dev/null || true
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null || true
+ip -6 addr add ::1/128 dev lo 2>/dev/null || true
 
 ip link set eth0 up 2>/dev/null || true
 

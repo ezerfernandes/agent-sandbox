@@ -49,6 +49,20 @@ done
     VSOCK-LISTEN:5000,fork \
     UNIX-CONNECT:/tmp/runtime.sock &
 
+# Per-template boot hooks. A template drops executable scripts in
+# /etc/sandbox/boot.d/ (the desktop template starts Xvnc and openbox there).
+# Each hook must return only once its daemons are actually serving: READY is
+# what create_snapshot.ts waits for before freezing memory, and a half-started
+# process is frozen half-started. A failing hook must not abort boot, hence the
+# `|| echo` under `set -e`.
+if [ -d /etc/sandbox/boot.d ]; then
+    for hook in /etc/sandbox/boot.d/*.sh; do
+        [ -f "$hook" ] || continue
+        echo "running boot hook: $hook"
+        sh "$hook" || echo "boot hook failed: $hook"
+    done
+fi
+
 echo "READY"
 
 wait $NODE_PID

@@ -7,6 +7,17 @@ TEMPLATE_DIR="${ARTIFACTS_DIR}/templates/${TEMPLATE}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Per-template build defaults (rootfs size, VM_* resource limits). Files use
+# `: "${VAR:=default}"`, so anything already exported on the command line wins
+# and nobody has to remember a template's sizing by hand.
+if [ -f "${SCRIPT_DIR}/${TEMPLATE}/build.env" ]; then
+  echo "Loading ${SCRIPT_DIR}/${TEMPLATE}/build.env"
+  set -a
+  # shellcheck disable=SC1090
+  . "${SCRIPT_DIR}/${TEMPLATE}/build.env"
+  set +a
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root, e.g. sudo -E env VM_MEM_SIZE_MIB=1024 ./templates/build.sh ${TEMPLATE}" >&2
   exit 1

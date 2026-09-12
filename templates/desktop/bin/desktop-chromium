@@ -1,0 +1,30 @@
+#!/bin/sh
+# Launch Chromium on the desktop display, optionally at a URL.
+#
+# Flags, and why:
+#   --no-sandbox              the microVM is the sandbox; Chromium's own needs
+#                             user namespaces the guest does not have
+#   --disable-dev-shm-usage   /dev/shm is a small tmpfs here
+#   --disable-gpu             no GPU in the VM; swiftshader does software GL
+#   --user-data-dir=/tmp/...  the root filesystem is mounted read-only
+#   --remote-debugging-port   lets playwright-core drive this same window
+set -e
+
+: "${DISPLAY:=:1}"
+: "${DESKTOP_GEOMETRY:=1280x800}"
+export DISPLAY
+
+WINDOW_SIZE="$(echo "${DESKTOP_GEOMETRY}" | tr 'x' ',')"
+
+exec desktop-launch chromium-browser \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --user-data-dir=/tmp/chromium-profile \
+    --remote-debugging-port=9222 \
+    --window-size="${WINDOW_SIZE}" \
+    --window-position=0,0 \
+    --start-maximized \
+    --no-first-run \
+    --no-default-browser-check \
+    "$@"

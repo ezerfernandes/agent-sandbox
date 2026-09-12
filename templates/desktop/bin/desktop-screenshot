@@ -1,0 +1,13 @@
+#!/bin/sh
+# Capture the desktop to a PNG. Read it back with
+#   GET /exec/:id/read?path=screenshot.png&encoding=base64
+# — the default utf8 read corrupts binary payloads.
+set -e
+
+: "${DISPLAY:=:1}"
+: "${HOME:=/tmp/desktop-home}"
+export DISPLAY HOME
+
+OUT="${1:-/workspace/screenshot.png}"
+scrot -o "${OUT}"
+echo "${OUT}"

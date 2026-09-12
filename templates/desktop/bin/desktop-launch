@@ -1,0 +1,26 @@
+#!/bin/sh
+# Start a long-running GUI program and return immediately.
+#
+# The guest runtime waits for a command's stdio to close before it answers the
+# host, so a plain `chromium-browser &` would still hang the /execute call for
+# the whole life of the browser. setsid + detached stdio is what makes a launch
+# return in milliseconds.
+set -e
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: desktop-launch <command> [args...]" >&2
+    exit 2
+fi
+
+: "${DISPLAY:=:1}"
+# The guest root is read-only, so a GUI program inheriting HOME=/root cannot
+# write its profile or crash database. Chromium dies with SIGTRAP when that
+# happens, so every launched program gets a writable HOME on tmpfs.
+: "${HOME:=/tmp/desktop-home}"
+: "${XDG_CONFIG_HOME:=${HOME}/.config}"
+: "${XDG_CACHE_HOME:=${HOME}/.cache}"
+export DISPLAY HOME XDG_CONFIG_HOME XDG_CACHE_HOME
+mkdir -p "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" 2>/dev/null || true
+
+setsid "$@" </dev/null >/tmp/desktop-launch.log 2>&1 &
+echo "launched: $* (pid $!)"

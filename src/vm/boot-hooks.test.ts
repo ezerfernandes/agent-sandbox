@@ -59,6 +59,21 @@ describe("start.sh boot hooks", () => {
     );
   });
 
+  it("brings loopback up before running the hooks", () => {
+    const source = fs.readFileSync(START_SH, "utf8");
+
+    // A guest from `docker export` boots with lo DOWN and no address, so
+    // anything binding localhost fails with EADDRNOTAVAIL. The desktop
+    // template's `Xvnc -localhost` died exactly this way on real Firecracker:
+    // "createTcpListeners: no addresses available". Hooks start daemons that
+    // bind localhost, so this has to happen first.
+    expect(source).toMatch(/ip link set lo up/);
+    expect(source).toMatch(/ip addr add 127\.0\.0\.1\/8 dev lo/);
+    expect(source.indexOf("ip link set lo up")).toBeLessThan(
+      source.indexOf("/etc/sandbox/boot.d"),
+    );
+  });
+
   it("runs every *.sh hook in lexical order", () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, "20-second.sh"), "echo second\n");

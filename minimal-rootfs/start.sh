@@ -19,6 +19,14 @@ mount -t tmpfs -o size=256m,mode=1777 tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /tmp
 mount -t tmpfs -o size=512m,mode=0755 tmpfs /workspace
 
+# Loopback. `docker export` carries no network configuration and nothing else in
+# the guest brings lo up, so it boots DOWN with no address and 127.0.0.1 is
+# unusable. Anything binding localhost fails with EADDRNOTAVAIL - the desktop
+# template's `Xvnc -localhost` dies with "createTcpListeners: no addresses
+# available", and a debug port or a local daemon would fail the same way.
+ip link set lo up 2>/dev/null || true
+ip addr add 127.0.0.1/8 dev lo 2>/dev/null || true
+
 ip link set eth0 up 2>/dev/null || true
 
 ip addr add 192.168.241.2/29 dev eth0 2>/dev/null || true

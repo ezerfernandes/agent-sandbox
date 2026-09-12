@@ -134,12 +134,13 @@ Internet
 
 ### Environment Templates
 
-Agent Sandbox comes with four pre-configured templates:
+Agent Sandbox comes with five pre-configured templates:
 
 * **`node`** (Default): Alpine Linux 3.20 + Node.js 22 + npm + git + curl
 * **`python`**: Alpine Linux 3.20 + Python 3.12 + pip + git + curl
 * **`go`**: Alpine Linux 3.20 + Go 1.23 + git + curl
 * **`browser`**: Alpine Linux 3.20 + Chromium + Playwright (`playwright-core`) — for agents that browse the live web
+* **`desktop`**: Alpine Linux 3.20 + Xvnc + openbox + Chromium + `xdotool`/`scrot` — a real X session an agent can drive and a human can watch over VNC
 
 #### Building & Creating Custom Templates
 
@@ -175,6 +176,8 @@ Custom templates run under three constraints worth designing around:
 * **The guest root filesystem is read-only.** Anything the runtime needs to write — caches, profiles, lock files — must live under `/workspace` or `/tmp`, both tmpfs. Warm any build-time cache (`fc-cache`, bytecode, package indexes) during `docker build`.
 * **Dockerfile `ENV` does not reach the guest.** `build.sh` ships the filesystem with `docker export`, which carries no image config. Write runtime variables to `/etc/environment`, which `start.sh` sources at boot.
 * **`docker export` carries no device nodes.** `start.sh` mounts `/proc`, `/sys`, `devtmpfs` on `/dev`, `devpts`, and `/dev/shm` at boot so the guest has a working environment.
+* **Daemons start from `/etc/sandbox/boot.d/*.sh`.** `start.sh` runs every hook there — after the pseudo-filesystems are mounted, before it prints `READY` — in lexical order, and a failing hook is logged rather than allowed to abort the boot. A hook **must not return until its daemons are actually serving**: `create_snapshot.ts` freezes guest memory the moment it sees `READY`, so anything half-started then is frozen half-started into every VM restored from that snapshot. `templates/desktop/boot.d/10-desktop.sh` is the worked example — it waits for `xdpyinfo` and for the RFB port to accept a connection before returning.
+* **Per-template sizing belongs in `build.env`.** `templates/<name>/build.env` is sourced by `build.sh` before anything else runs; write defaults as `: "${VM_MEM_SIZE_MIB:=1536}"` so an explicitly exported value still wins.
 
 Editing `minimal-rootfs/start.sh` or `templates/base/Dockerfile` changes the shared base image, so **every** template must be rebuilt for the change to take effect — existing snapshots keep the old boot script.
 
@@ -183,19 +186,17 @@ Editing `minimal-rootfs/start.sh` or `templates/base/Dockerfile` changes the sha
 The `browser` template needs far more RAM, CPU, and disk than the language templates. Those values are read from the environment at build time and baked into the template's `template.json`, so the server applies them per-session at restore. No global configuration change is needed, and the other templates keep their tight defaults.
 
 ```bash
-sudo -E env \
-  ROOTFS_SIZE=2048 \
-  VM_VCPU_COUNT=2 \
-  VM_MEM_SIZE_MIB=1024 \
-  VM_MEMORY_LIMIT_BYTES=1610612736 \
-  VM_CPU_QUOTA_US=200000 \
-  VM_NOFILE_LIMIT=8192 \
-  VM_PIDS_LIMIT=512 \
-  ./templates/build.sh browser
+sudo -E ./templates/build.sh browser
+```
+
+Those values live in `templates/browser/build.env`, which `build.sh` sources for any template that ships one. Override a single value on the command line and it still wins:
+
+```bash
+sudo -E env VM_MEM_SIZE_MIB=2048 ./templates/build.sh browser
 ```
 
 > [!IMPORTANT]
-> `sudo -E` is required. Without `-E`, sudo resets the environment and the snapshot is baked with the 128 MiB / 1 vCPU defaults; the microVM still boots, but Chromium is killed by the host cgroup on the first page load.
+> `sudo -E` is still required for the overrides. Without `-E`, sudo resets the environment and anything you exported yourself is dropped before `build.sh` runs.
 
 > [!NOTE]
 > If Node.js is installed through nvm, fnm, or volta, it lives under your home directory and sudo's `secure_path` hides it. `build.sh` probes those locations automatically; if it still cannot find an interpreter, pass one explicitly with `NODE_BIN="$(command -v node)"` in the same `env` list.
@@ -223,7 +224,6 @@ With the template built and the server running, this sequence navigates a page a
 
 ```bash
 cat > /tmp/shot.js <<'EOF'
-const fs = require("fs");
 const { chromium } = require("playwright-core");
 
 (async () => {
@@ -234,8 +234,7 @@ const { chromium } = require("playwright-core");
   const page = await browser.newPage();
   await page.goto("https://example.com", { waitUntil: "domcontentloaded" });
   console.log("title:", await page.title());
-  const shot = await page.screenshot({ fullPage: true });
-  fs.writeFileSync("/workspace/shot.png.b64", shot.toString("base64"));
+  const shot = await page.screenshot({ path: "/workspace/shot.png", fullPage: true });
   console.log("bytes:", shot.length);
   await browser.close();
 })();
@@ -264,7 +263,7 @@ curl -s -X POST http://localhost:3000/exec/browse-1/execute \
 
 ```bash
 curl -s -H "Authorization: Bearer $KEY" \
-  "http://localhost:3000/exec/browse-1/read?path=shot.png.b64" \
+  "http://localhost:3000/exec/browse-1/read?path=shot.png&encoding=base64" \
   | jq -r .content | base64 -d > /tmp/shot.png
 
 file /tmp/shot.png
@@ -279,15 +278,8 @@ curl -s -X DELETE -H "Authorization: Bearer $KEY" http://localhost:3000/exec/bro
 
 Launch, navigation, and screenshot together take roughly 3.3 seconds, since every `execute` starts Chromium from scratch. For a navigate/click/extract loop, keep a browser alive with `launchServer` rather than paying that per step.
 
-> [!WARNING]
-> The `read` endpoint is **text-only**. The guest returns file contents as base64, but the HTTP layer decodes them to UTF-8 before responding, which corrupts binary data. To retrieve a screenshot, base64-encode it inside the guest and read the resulting text file:
->
-> ```js
-> const shot = await page.screenshot();
-> require("fs").writeFileSync("/workspace/shot.png.b64", shot.toString("base64"));
-> ```
->
-> Then `GET /exec/<id>/read?path=shot.png.b64` and `base64 -d` on the host.
+> [!NOTE]
+> `read` decodes to UTF-8 unless you ask otherwise, which corrupts binary data. Pass `encoding=base64` for screenshots and other binary files — the guest's base64 payload then comes back untouched. Earlier revisions of this guide base64-encoded inside the guest and read a `.b64` text file; that workaround is no longer needed.
 
 > [!NOTE]
 > Restoring a 1 GiB memory snapshot faults pages in on demand, so the `browser` template does not hit the sub-100ms cold start documented for the language templates. Expect tens of milliseconds.
@@ -300,7 +292,52 @@ Launch, navigation, and screenshot together take roughly 3.3 seconds, since ever
 | Chromium exits with `SIGTRAP` right after launch | The guest is missing `/proc` or `/dev`. Check with `{"command":"sh","args":["-c","mount"]}`; rebuild the template if `start.sh` predates the pseudo-filesystem mounts. |
 | `browserType.launch: ... Pass userDataDir parameter` | `--user-data-dir` was passed to `launch()`. Remove it. |
 | VM dies mid-run, no Chromium error | Host cgroup OOM. Confirm `resources.memoryLimitBytes` in `template.json` is the value you built with. |
-| Screenshot file is not a PNG | It was read through the text-only `read` endpoint without base64-encoding in the guest first. |
+| Screenshot file is not a PNG | The file was read without `encoding=base64`, so the bytes were mangled by the UTF-8 decode. |
+
+---
+
+#### Building the Desktop Template
+
+```bash
+sudo -E ./templates/build.sh desktop
+```
+
+Sizing comes from `templates/desktop/build.env` (2 GiB rootfs, 2 vCPU, 1536 MiB RAM, 2 GiB cgroup limit), so there is no env list to remember — `sudo -E` is still needed so an explicitly exported override survives, and anything you do export wins over the file. The same mechanism now backs `browser`; `templates/<name>/build.env` is picked up for any template that has one.
+
+What the template adds on top of the base image:
+
+* `Xvnc :1` at `DESKTOP_GEOMETRY` (default `1280x800`, 24-bit), bound to loopback with no VNC password — the only route in is the vsock bridge, which the host gates on an API key.
+* `openbox` as the window manager, both under respawn loops so a crash does not leave a black screen.
+* `socat VSOCK-LISTEN:5900 → 127.0.0.1:5901`, which is what `GET /exec/:id/vnc` connects to.
+* `/etc/sandbox/boot.d/10-desktop.sh`, run by `start.sh` **before** it prints `READY`. That ordering matters: `create_snapshot.ts` freezes guest memory on `READY`, so the hook waits for `xdpyinfo` and the RFB port to answer before returning. A hook that returned early would bake a half-started X session into every restored VM.
+* Helper commands on `PATH`: `desktop-launch <cmd>` (detaches a GUI program with `setsid` so `/execute` returns immediately instead of waiting for the window to close), `desktop-chromium [url]` (Chromium with the flags a GPU-less read-only guest needs), `desktop-screenshot [path]` (PNG via `scrot`, default `/workspace/screenshot.png`).
+* `desktop-chromium` starts Chromium with `--remote-debugging-port=9222` on purpose, so `playwright-core` can attach to the same window a human is watching over VNC. The port is guest-local: nothing bridges it, and the microVM's only ingress is vsock 5000 (runtime) and 5900 (VNC), both gated on an API key by the host.
+
+Driving it end to end:
+
+```bash
+# Open a browser window on the desktop — returns in milliseconds, not when Chromium exits
+curl -X POST http://localhost:3000/exec/desk-1/execute \
+  -H "Authorization: Bearer sk_test_..." -H "Content-Type: application/json" \
+  -d '{"template":"desktop","command":"desktop-chromium","args":["https://example.com"]}'
+
+# Take a screenshot and read it back as a real PNG
+curl -X POST http://localhost:3000/exec/desk-1/execute \
+  -H "Authorization: Bearer sk_test_..." -H "Content-Type: application/json" \
+  -d '{"command":"desktop-screenshot"}'
+
+curl -H "Authorization: Bearer sk_test_..." \
+  "http://localhost:3000/exec/desk-1/read?path=screenshot.png&encoding=base64" \
+  | jq -r .content | base64 -d > shot.png
+
+# Synthesise input
+curl -X POST http://localhost:3000/exec/desk-1/execute \
+  -H "Authorization: Bearer sk_test_..." -H "Content-Type: application/json" \
+  -d '{"command":"xdotool","args":["key","ctrl+l"]}'
+```
+
+> [!NOTE]
+> A desktop VM holds 1536 MiB of guest RAM and a memory snapshot of the same order on disk, so plan concurrency well below `VM_MAX_SLOTS`. Chromium is launched on demand rather than baked into the snapshot, which keeps the restore small.
 
 ---
 
@@ -489,7 +526,7 @@ Add to your MCP client configuration (e.g. `claude_desktop_config.json`):
 | `list_templates` | — | List available environment templates and installed runtimes. |
 | `execute` | `sessionId`, `command`, `args?`, `cwd?`, `timeout?` | Execute a binary or command inside the VM. |
 | `write_file` | `sessionId`, `path`, `content` | Write a file to `/workspace`. |
-| `read_file` | `sessionId`, `path` | Read a file from `/workspace`. |
+| `read_file` | `sessionId`, `path`, `encoding?` | Read a file from `/workspace`. `encoding: "base64"` returns the raw payload for binary files. |
 | `list_files` | `sessionId`, `path?`, `recursive?` | List contents of the workspace. |
 | `reset_session` | `sessionId` | Immediately destroy the session and release resources. |
 
@@ -520,24 +557,64 @@ curl -X POST http://localhost:3000/exec/session-1/write \
   -H "Content-Type: application/json" \
   -d '{"path": "hello.txt", "content": "Hello World", "template": "node"}'
 
-# Read a file from /workspace (text only — see below)
+# Read a file from /workspace (utf8 by default)
 curl -H "Authorization: Bearer sk_test_..." \
   "http://localhost:3000/exec/session-1/read?path=hello.txt"
+
+# Read a binary file (screenshot, archive) without corrupting it
+curl -H "Authorization: Bearer sk_test_..." \
+  "http://localhost:3000/exec/session-1/read?path=screenshot.png&encoding=base64"
 
 # List files in /workspace
 curl -H "Authorization: Bearer sk_test_..." \
   "http://localhost:3000/exec/session-1/files?recursive=true"
+
+# Execute with a caller-chosen id, then stop it from another shell
+curl -X POST http://localhost:3000/exec/session-1/execute \
+  -H "Authorization: Bearer sk_test_..." \
+  -H "Content-Type: application/json" \
+  -d '{"command": "sleep", "args": ["100"], "messageId": "run-abcdef12"}'
+
+curl -X POST http://localhost:3000/exec/session-1/cancel \
+  -H "Authorization: Bearer sk_test_..." \
+  -H "Content-Type: application/json" \
+  -d '{"messageId": "run-abcdef12"}'   # 202; the execute call returns signal: SIGTERM
 
 # Terminate session
 curl -X DELETE -H "Authorization: Bearer sk_test_..." \
   http://localhost:3000/exec/session-1
 ```
 
+#### Cancelling a running command
+
+`execute` accepts an optional `messageId` (8–64 characters of `[A-Za-z0-9_-]`). It comes back in the JSON response, and in NDJSON mode it is announced up front as the first frame — `{"type":"started","messageId":"…"}` — so a streaming client knows what to cancel before the command finishes:
+
+```
+{"type":"started","messageId":"run-abcdef12"}
+{"type":"stream","stream":"stdout","data":"…"}
+{"type":"result","exitCode":0,"duration":1234}
+```
+
+`POST /exec/:id/cancel` answers **202** as soon as the guest has been told to stop: the runtime sends `SIGTERM` to the process group, then `SIGKILL` after 5 seconds. The outcome shows up on the original `execute` call (`"signal": "SIGTERM"`), not on the cancel. Cancelling a command that has already finished is harmless. The endpoint never provisions a VM — a session with no live VM answers **404**.
+
+#### Watching a desktop session (`GET /exec/:id/vnc`)
+
+`desktop` sessions expose their X display as a WebSocket carrying raw RFB, which any noVNC client can render:
+
+```bash
+# Bearer header only — an access_token query parameter is deliberately not accepted
+wscat -H "Authorization: Bearer sk_test_..." \
+  --connect "ws://localhost:3000/exec/desk-1/vnc?template=desktop"
+# < RFB 003.008
+```
+
+The handshake is the usual one: `exec` scope, session ownership, and lazy VM provisioning through the same path as `/execute`, so the first connection to a fresh session id boots the desktop. Failures answer before the upgrade — **401**/**403** on auth, **429** past `VNC_MAX_CONNECTIONS_PER_SESSION`, **502** when the guest has no VNC listener (usually: not a `desktop` template), and a plain `GET` without an upgrade gets **426**. While a viewer is attached the session is kept alive against the idle reaper, and a tab that dies without closing the socket is dropped by ping/pong liveness rather than pinning the VM's memory.
+
 > [!IMPORTANT]
 > **A session's template is fixed by the first request that touches it.** Whichever call provisions the microVM — commonly `write`, not `execute` — determines the environment, and `template` on later requests against a live session is ignored. Writing a file and then executing with `"template": "browser"` runs on whatever the write created. Pass `template` on the first call, or use a fresh session id.
 
-> [!WARNING]
-> `read` returns **text only**. The guest encodes file contents as base64, but the endpoint decodes to UTF-8 before responding, so binary files come back corrupted. Base64-encode inside the guest and read the resulting text file instead.
+> [!NOTE]
+> `read` decodes to UTF-8 by default, which corrupts binary files. Pass `encoding=base64` for anything that is not text; the response carries the guest's base64 payload untouched and an `encoding` field saying which you got. The SDK equivalent is `session.readFile(path, { encoding: "base64" })`, and the MCP `read_file` tool takes the same `encoding` argument.
 
 ### Authentication & API Key Management
 
@@ -699,6 +776,8 @@ Configure Agent Sandbox through environment variables. The server reads `process
 | `VM_BW_ENABLED` | `false` | Enable TC network bandwidth throttling. |
 | `VM_BW_RATE_KBIT` | `10240` | TC bandwidth limit in kbit/s (10240 = 10 Mbit/s). |
 | `VM_BW_BURST_KBIT` | `1024` | TC burst allowance in kbit. |
+| `VNC_MAX_CONNECTIONS_PER_SESSION` | `2` | Concurrent `GET /exec/:id/vnc` bridges allowed per session; further upgrades get 429. |
+| `VNC_MAX_DURATION_MS` | `14400000` | Hard cap on a single VNC connection (4 hours), after which the socket is closed. |
 
 ---
 
@@ -706,7 +785,7 @@ Configure Agent Sandbox through environment variables. The server reads `process
 
 Agent Sandbox includes production-grade observability out of the box:
 
-* **Prometheus Metrics** (`GET /metrics`): Tracks `active_vm_count`, `vm_creation_time`, `exec_sessions_active`, `exec_session_duration_seconds`, `exec_message_duration_seconds`, `vsock_connection_time`, and egress policies.
+* **Prometheus Metrics** (`GET /metrics`): Tracks `active_vm_count`, `vm_creation_time`, `exec_sessions_active`, `exec_session_duration_seconds`, `exec_message_duration_seconds`, `vsock_connection_time`, `vnc_connections_active`, `vnc_connections_total{result}`, and egress policies.
 * **Liveness & Readiness Probes**:
   * `GET /health` — Verifies process uptime.
   * `GET /ready` — Evaluates node readiness and host memory headroom.

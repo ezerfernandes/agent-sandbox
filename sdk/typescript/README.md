@@ -102,6 +102,16 @@ await session.writeFile("index.js", 'console.log("hello")');
 // Read a file
 const { content } = await session.readFile("index.js");
 
+// Binary files (screenshots, archives) must be read as base64 — the default
+// utf8 decode corrupts them.
+const shot = await session.readFile("screenshot.png", { encoding: "base64" });
+const png = Buffer.from(shot.content, "base64");
+
+// Long-running commands can be stopped: pass a messageId, cancel it elsewhere.
+const running = session.exec("sleep", { args: ["100"], messageId: "run-abcdef12" });
+await session.cancel("run-abcdef12");
+await running; // resolves with signal: "SIGTERM"
+
 // List files
 const { files } = await session.listFiles(".", { recursive: true });
 ```
@@ -164,7 +174,8 @@ try {
 | `run(shellCommand, opts?)` | Run a shell command via `sh -c` |
 | `runCode(code, opts?)` | Run code using the session's runtime |
 | `writeFile(path, content)` | Write a file to `/workspace` |
-| `readFile(path)` | Read a file from `/workspace` |
+| `readFile(path, opts?)` | Read a file from `/workspace`; `{ encoding: "base64" }` for binary files |
+| `cancel(messageId)` | Stop a running command started with that `messageId` |
 | `listFiles(path?, opts?)` | List files in `/workspace` |
 | `destroy()` | Destroy session and release resources |
 

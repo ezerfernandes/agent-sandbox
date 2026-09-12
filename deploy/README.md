@@ -58,15 +58,18 @@ Idempotent and re-runnable; every step checks for its own result first.
    `e2fsprogs`, Node.js 22 if absent. Disables any system-wide `dnsmasq`
    service — the sandbox spawns its own per microVM, and a resolver holding
    port 53 collides with them.
-3. Installs the latest `firecracker` and `jailer` into `/usr/local/bin`.
+3. Installs a **pinned** `firecracker` and `jailer` into `/usr/local/bin`,
+   verified against a hardcoded sha256 before extraction.
 4. Creates the `firecracker` system user and group at **uid 997 / gid 982** —
    the values `src/vm/jailer.ts` passes to the jailer. Override them in both
    places or neither.
 5. Enables `net.ipv4.ip_forward` persistently (guest internet access).
-6. Creates `/var/lib/agent-sandbox/artifacts`, downloads the guest kernel,
-   sets `root:firecracker 0750`.
-7. `npm install && npm run build` as the repo's owner, not as root, so `dist/`
-   does not end up root-owned.
+6. Creates `/var/lib/agent-sandbox/artifacts`, downloads the guest kernel and
+   verifies its sha256 before installing it, sets `root:firecracker 0750`.
+7. `npm ci && npm run build` as the repo's owner, not as root, so `dist/` does
+   not end up root-owned. Dependencies are installed on **every** run: skipping
+   when `node_modules/` exists leaves the tree stale after a pull that adds a
+   dependency, which is exactly when the re-run was needed.
 8. Copies `sandbox.env.example` to `/etc/agent-sandbox/sandbox.env` — **existing
    files are never overwritten**, so re-running is safe.
 9. Optionally builds templates (`--templates "node browser"`).
@@ -83,7 +86,29 @@ It does **not** create API keys, start the service, or touch a firewall.
 | `--install-service` | Install + enable the systemd unit |
 | `--skip-packages` | Assume packages are already present |
 | `--skip-kvm-check` | Stage a host without `/dev/kvm` |
-| `--skip-build` | Re-provision without re-running `npm install` / `npm run build` |
+| `--skip-build` | Re-provision without re-running `npm ci` / `npm run build` |
+
+### Pinned downloads
+
+Three things are fetched and then trusted with root: the firecracker and jailer
+binaries, and the guest kernel every microVM boots. All three are pinned and
+checksum-verified, and a mismatch aborts the run without installing anything.
+
+| Variable | Default | Use |
+|---|---|---|
+| `FC_VERSION` | `v1.17.0` | Firecracker release to install |
+| `FC_SHA256` | per-arch, hardcoded | Override for an architecture not listed |
+| `KERNEL_URL` | project release asset | Point at your own kernel |
+| `KERNEL_SHA256` | digest of the default kernel | **Set this whenever you set `KERNEL_URL`**; empty skips verification (warned) |
+| `NODE_MAJOR_WANTED` | `22` | Node.js major from NodeSource |
+
+To move to a newer Firecracker, bump `FC_VERSION` and replace both digests in
+`provision.sh` with the ones from that release's own
+`firecracker-<version>-<arch>.tgz.sha256.txt`.
+
+Node.js is installed by adding the NodeSource signing key and apt source
+directly rather than by piping their `setup_22.x` script into `bash` as root:
+apt then verifies a signature on every package, and no vendor code runs here.
 
 ---
 
@@ -147,6 +172,14 @@ creation fails.
 
 The key is printed once; only its hash is stored. Scopes are `exec`, `admin`,
 `metrics`.
+
+`create-key.sh` reads `AUTH_KEYS_PATH`, `AUTH_KEY_PREFIX` and `PORT` out of
+`/etc/agent-sandbox/sandbox.env` — the same `EnvironmentFile` the unit uses — and
+prints the store it wrote to. The CLI and the server default that path
+independently, so customising it in `sandbox.env` alone would have the CLI keep
+writing to the default while the server read elsewhere: the new key then answers
+401 forever, looking exactly like a bad key. Point `CONFIG_FILE` elsewhere if
+your unit uses a different env file.
 
 ---
 

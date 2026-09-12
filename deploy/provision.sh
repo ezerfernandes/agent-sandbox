@@ -22,11 +22,43 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ARTIFACTS_DIR="${FIRECRACKER_ARTIFACTS_DIR:-/var/lib/agent-sandbox/artifacts}"
-KERNEL_URL="${KERNEL_URL:-https://github.com/vivek1504/agent-sandbox/releases/download/Beta/vmlinux}"
+DEFAULT_KERNEL_URL="https://github.com/vivek1504/agent-sandbox/releases/download/Beta/vmlinux"
+KERNEL_URL="${KERNEL_URL:-${DEFAULT_KERNEL_URL}}"
 FC_UID="${FIRECRACKER_UID:-997}"
 FC_GID="${FIRECRACKER_GID:-982}"
 SERVICE_USER="${SERVICE_USER:-$(stat -c '%U' "${PROJECT_ROOT}")}"
 CONFIG_DIR=/etc/agent-sandbox
+
+# ---------------------------------------------------------------------------
+# Pinned downloads
+# ---------------------------------------------------------------------------
+# Everything this script fetches is installed with root privileges and then run
+# as root: the firecracker and jailer binaries, and the guest kernel every VM
+# boots. Pinned by version and verified by checksum so a replaced, re-tagged or
+# man-in-the-middled asset fails the run instead of being installed.
+#
+# To move to a newer firecracker: bump FC_VERSION and replace both digests with
+# the ones from that release's own firecracker-<version>-<arch>.tgz.sha256.txt.
+FC_VERSION="${FC_VERSION:-v1.17.0}"
+FC_SHA256_x86_64="06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558"
+FC_SHA256_aarch64="e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256"
+
+# sha256 of the guest kernel published at DEFAULT_KERNEL_URL. It applies only to
+# that URL: pointing KERNEL_URL at your own kernel without supplying a matching
+# KERNEL_SHA256 would otherwise fail the check against a digest for a different
+# file, which reads as tampering rather than as the misconfiguration it is.
+# Set KERNEL_SHA256 explicitly for a custom kernel, or to the empty string to
+# skip verification deliberately (you will be warned).
+DEFAULT_KERNEL_SHA256="e41c7048bd2475e7e788153823fcb9166a7e0b78c4c443bd6446d015fa735f53"
+if [ -z "${KERNEL_SHA256+set}" ]; then
+    if [ "${KERNEL_URL}" = "${DEFAULT_KERNEL_URL}" ]; then
+        KERNEL_SHA256="${DEFAULT_KERNEL_SHA256}"
+    else
+        KERNEL_SHA256=""
+    fi
+fi
+
+NODE_MAJOR_WANTED="${NODE_MAJOR_WANTED:-22}"
 
 SKIP_PACKAGES=0
 SKIP_KVM_CHECK=0
@@ -37,6 +69,22 @@ TEMPLATES=""
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Verify a downloaded file before anything is installed from it or executed.
+# Always against a file on disk, never a pipe: a checksum can only be checked
+# once the whole byte stream has been seen, so `curl | tar` cannot be verified
+# at all.
+verify_sha256() {
+    local file="$1" expected="$2" what="$3" actual
+    actual="$(sha256sum "${file}" | cut -d' ' -f1)"
+    if [ "${actual}" != "${expected}" ]; then
+        die "checksum mismatch for ${what}
+  expected ${expected}
+  actual   ${actual}
+Refusing to install. Either the published asset changed, or the download was
+tampered with. Confirm the digest upstream before overriding it here."
+    fi
+}
 
 usage() {
     sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -81,11 +129,23 @@ if [ "${SKIP_PACKAGES}" -eq 0 ]; then
     apt-get update -qq
     apt-get install -y -qq \
         ca-certificates curl git iproute2 iptables e2fsprogs \
-        dnsmasq-base docker.io jq
+        dnsmasq-base docker.io jq gnupg
 
     if ! command -v node >/dev/null 2>&1; then
-        log "installing Node.js 22"
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        log "installing Node.js ${NODE_MAJOR_WANTED}"
+        # NodeSource's own instructions are `curl … | bash -`, which runs an
+        # unpinned remote script as root and whose content is whatever the
+        # endpoint serves at that moment. The script's actual job is to add a
+        # signing key and an apt source; done directly, apt verifies the
+        # signature on every package that follows and no vendor code executes
+        # here at all.
+        install -d -m 0755 /usr/share/keyrings
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+            | gpg --dearmor --yes -o /usr/share/keyrings/nodesource.gpg
+        chmod 0644 /usr/share/keyrings/nodesource.gpg
+        printf 'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' \
+            "${NODE_MAJOR_WANTED}" > /etc/apt/sources.list.d/nodesource.list
+        apt-get update -qq
         apt-get install -y -qq nodejs
     fi
 
@@ -114,17 +174,29 @@ log "node ${NODE_BIN} ($(node -v))"
 if command -v firecracker >/dev/null 2>&1 && command -v jailer >/dev/null 2>&1; then
     log "firecracker already installed ($(firecracker --version | head -1))"
 else
-    log "installing firecracker and jailer"
     ARCH="$(uname -m)"
+    # Pinned rather than resolved from /releases/latest. "latest" is a moving
+    # target: two hosts provisioned a week apart got different hypervisors, and
+    # no digest can be pinned for a version that is not known in advance.
+    FC_SHA256_VAR="FC_SHA256_${ARCH}"
+    FC_SHA256="${FC_SHA256:-${!FC_SHA256_VAR:-}}"
+    [ -n "${FC_SHA256}" ] || die "no pinned checksum for firecracker ${FC_VERSION} on ${ARCH}.
+Fetch it from
+  https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz.sha256.txt
+and pass it as FC_SHA256=<hex>."
+
+    log "installing firecracker ${FC_VERSION} (${ARCH})"
     RELEASE_URL="https://github.com/firecracker-microvm/firecracker/releases"
-    LATEST="$(basename "$(curl -fsSLI -o /dev/null -w '%{url_effective}' "${RELEASE_URL}/latest")")"
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP}"' EXIT
 
-    curl -fsSL "${RELEASE_URL}/download/${LATEST}/firecracker-${LATEST}-${ARCH}.tgz" \
-        | tar -xz -C "${TMP}"
-    install -m 0755 "${TMP}/release-${LATEST}-${ARCH}/firecracker-${LATEST}-${ARCH}" /usr/local/bin/firecracker
-    install -m 0755 "${TMP}/release-${LATEST}-${ARCH}/jailer-${LATEST}-${ARCH}"      /usr/local/bin/jailer
+    curl -fsSL "${RELEASE_URL}/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" \
+        -o "${TMP}/firecracker.tgz"
+    verify_sha256 "${TMP}/firecracker.tgz" "${FC_SHA256}" "firecracker ${FC_VERSION} (${ARCH})"
+
+    tar -xzf "${TMP}/firecracker.tgz" -C "${TMP}"
+    install -m 0755 "${TMP}/release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" /usr/local/bin/firecracker
+    install -m 0755 "${TMP}/release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}"      /usr/local/bin/jailer
     rm -rf "${TMP}"
     trap - EXIT
     log "installed $(firecracker --version | head -1)"
@@ -169,7 +241,25 @@ if [ -f "${ARTIFACTS_DIR}/vmlinux" ]; then
     log "guest kernel already present"
 else
     log "downloading guest kernel"
-    curl -fsSL "${KERNEL_URL}" -o "${ARTIFACTS_DIR}/vmlinux"
+    # Staged and verified before it reaches its destination. Downloading
+    # straight to ${ARTIFACTS_DIR}/vmlinux leaves a truncated or wrong kernel in
+    # place when the transfer or the check fails, and the "already present"
+    # branch above then skips past it on every later run.
+    KERNEL_TMP="$(mktemp -d)"
+    trap 'rm -rf "${KERNEL_TMP}"' EXIT
+    curl -fsSL "${KERNEL_URL}" -o "${KERNEL_TMP}/vmlinux"
+
+    if [ -n "${KERNEL_SHA256}" ]; then
+        verify_sha256 "${KERNEL_TMP}/vmlinux" "${KERNEL_SHA256}" "guest kernel from ${KERNEL_URL}"
+        log "guest kernel checksum verified"
+    else
+        warn "KERNEL_SHA256 is empty — installing an unverified guest kernel.
+     Every microVM on this host boots it as its kernel."
+    fi
+
+    install -m 0644 "${KERNEL_TMP}/vmlinux" "${ARTIFACTS_DIR}/vmlinux"
+    rm -rf "${KERNEL_TMP}"
+    trap - EXIT
 fi
 chown -R "root:firecracker" "${ARTIFACTS_DIR}"
 chmod 750 "${ARTIFACTS_DIR}"
@@ -179,8 +269,18 @@ log "artifacts at ${ARTIFACTS_DIR}"
 # 7. Build the project
 # ---------------------------------------------------------------------------
 if [ "${SKIP_BUILD}" -eq 0 ]; then
-    if [ ! -d "${PROJECT_ROOT}/node_modules" ]; then
-        log "installing npm dependencies"
+    # Installed unconditionally. Guarding on node_modules existing made a re-run
+    # after a pull that adds a dependency a silent no-op — the tree stayed stale
+    # in precisely the case the re-run was meant to repair, and the failure
+    # surfaced later as a missing module at startup.
+    if [ -f "${PROJECT_ROOT}/package-lock.json" ]; then
+        # `npm ci` installs exactly the lockfile and removes anything else, which
+        # is what a deploy wants; it also fails loudly if the lockfile and
+        # package.json have drifted, rather than quietly resolving something new.
+        log "installing npm dependencies (npm ci)"
+        sudo -u "${SERVICE_USER}" -H bash -lc "cd '${PROJECT_ROOT}' && npm ci"
+    else
+        log "installing npm dependencies (npm install — no lockfile present)"
         sudo -u "${SERVICE_USER}" -H bash -lc "cd '${PROJECT_ROOT}' && npm install"
     fi
     # Built as the repo's owner rather than root: a root-owned dist/ breaks the

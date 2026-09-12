@@ -1,9 +1,12 @@
 [Unit]
 Description=agent-sandbox — Firecracker microVM execution sandbox
 Documentation=https://github.com/vivek1504/agent-sandbox
-After=network-online.target docker.service
+# Docker is deliberately absent here. It is a build-time dependency only:
+# templates/build.sh uses it to export a rootfs, and the result is a snapshot on
+# disk. The server never shells out to docker, so `Requires=docker.service` only
+# meant the sandbox refused to start — or was stopped — whenever docker was.
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
 
 [Service]
 Type=simple

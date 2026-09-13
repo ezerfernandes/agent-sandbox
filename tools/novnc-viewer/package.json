@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Browser viewer for agent-sandbox desktop sessions, bridging noVNC to the authenticated /exec/:id/vnc WebSocket",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node test.mjs"
   },
   "dependencies": {
     "@novnc/novnc": "^1.7.0",

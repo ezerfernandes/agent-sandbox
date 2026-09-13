@@ -29,6 +29,42 @@ if (!KEY) {
   process.exit(1);
 }
 
+// ---------------------------------------------------------------------------
+// Origin and Host checks
+// ---------------------------------------------------------------------------
+// Binding 127.0.0.1 keeps other hosts out. It does nothing about the browser
+// already running on this machine: WebSocket handshakes are exempt from the
+// same-origin policy — no preflight, no CORS — so any page on any site the
+// operator visits can open ws://127.0.0.1:6080/websockify?session=desk-1, and
+// this process would dutifully attach the API key to the upstream dial. That
+// hands a live RFB channel, keyboard and mouse included, to a page the operator
+// merely visited. Session ids need no discovering; the docs use `desk-1`.
+const ALLOWED_ORIGINS = new Set(
+  (process.env.VIEWER_ALLOWED_ORIGINS ??
+    `http://127.0.0.1:${PORT},http://localhost:${PORT},http://[::1]:${PORT}`)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  // Browsers always send Origin on a WebSocket handshake and on a cross-site
+  // POST. A request carrying none is a non-browser client — curl, a node
+  // script — which is not this threat: the attack requires a victim's browser.
+  if (origin === undefined) return true;
+  return ALLOWED_ORIGINS.has(origin);
+}
+
+function hostAllowed(req) {
+  // DNS rebinding: a page served from attacker.example, whose name has been
+  // repointed at 127.0.0.1, is same-origin to the browser — so it sends no
+  // Origin at all and the check above passes it. The Host header still carries
+  // the attacker's name, which is what catches it.
+  const name = (req.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
+  return name === "127.0.0.1" || name === "localhost" || name === "[::1]";
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -69,6 +105,11 @@ async function sandbox(pathname, init = {}) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
 
+  if (!hostAllowed(req) || !originAllowed(req)) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    return res.end('{"error":"forbidden: unexpected Origin or Host"}');
+  }
+
   if (url.pathname === "/") {
     const html = await readFile(path.join(HERE, "index.html"));
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -103,11 +144,21 @@ const server = createServer(async (req, res) => {
 // ---------------------------------------------------------------------------
 // WebSocket bridge: browser (no credentials) <-> sandbox (Bearer header)
 // ---------------------------------------------------------------------------
-const wss = new WebSocketServer({ noServer: true });
+// RFB is already a binary stream; src/routes/vnc.ts disables compression on the
+// same bytes for the same reason, and paying for it twice on one hop is worse.
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname !== "/websockify") {
+    socket.destroy();
+    return;
+  }
+  if (!hostAllowed(req) || !originAllowed(req)) {
+    console.warn(
+      `[bridge] refused upgrade from Origin=${req.headers.origin ?? "(none)"} Host=${req.headers.host ?? "(none)"}`,
+    );
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -120,30 +171,30 @@ server.on("upgrade", (req, socket, head) => {
 
   wss.handleUpgrade(req, socket, head, (client) => {
     const target = `${SANDBOX.replace(/^http/, "ws")}/exec/${encodeURIComponent(sessionId)}/vnc`;
-    const upstream = new WebSocket(target, { headers: { Authorization: `Bearer ${KEY}` } });
-
-    // RFB bytes can arrive before the browser socket finishes opening, and a
-    // dropped greeting desynchronises the whole protocol. Queue until ready.
-    const pending = [];
-    const toClient = (data) => {
-      if (client.readyState === WebSocket.OPEN) client.send(data, { binary: true });
-      else pending.push(data);
-    };
-
-    client.on("open", () => {
-      while (pending.length) client.send(pending.shift(), { binary: true });
+    const upstream = new WebSocket(target, {
+      headers: { Authorization: `Bearer ${KEY}` },
+      perMessageDeflate: false,
     });
+
+    // The socket handleUpgrade hands back is already OPEN — a server-side `ws`
+    // socket never emits `open`, that is a client-side event — so there is
+    // nothing to queue in this direction. It is `upstream` that opens late, and
+    // it cannot deliver a message before it is open. What can happen is the
+    // browser sending before upstream is ready, so that is the side that queues.
+    const pending = [];
 
     upstream.on("open", () => {
       console.log(`[bridge] ${sessionId}: connected`);
-      while (pending.length && client.readyState === WebSocket.OPEN) {
-        client.send(pending.shift(), { binary: true });
-      }
+      while (pending.length) upstream.send(pending.shift(), { binary: true });
     });
 
-    upstream.on("message", (data) => toClient(data));
+    upstream.on("message", (data) => {
+      if (client.readyState === WebSocket.OPEN) client.send(data, { binary: true });
+    });
+
     client.on("message", (data) => {
       if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: true });
+      else if (upstream.readyState === WebSocket.CONNECTING) pending.push(data);
     });
 
     const shutdown = (who) => (codeOrErr) => {

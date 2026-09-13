@@ -41,16 +41,44 @@ browser ──ws (no auth)──▶ viewer :6080 ──ws + Bearer──▶ sand
 | `SANDBOX_KEY` | *(required)* | API key with the `exec` scope |
 | `SANDBOX_URL` | `http://127.0.0.1:3000` | Where the sandbox listens |
 | `VIEWER_PORT` | `6080` | Port for this viewer |
+| `VIEWER_ALLOWED_ORIGINS` | `http://127.0.0.1:$PORT`, `http://localhost:$PORT`, `http://[::1]:$PORT` | Comma-separated `Origin` allowlist for the bridge |
 
 ## Security
 
-This viewer has **no authentication of its own** and holds an API key. It binds
-`127.0.0.1` only, so it is reachable through an SSH tunnel and not from the
-network — anyone who can reach the port can drive every desktop session the key
-can reach, with no further credentials. Do not bind it to `0.0.0.0`, and do not
-put it behind a plain reverse proxy without adding authentication in front.
+This viewer has **no authentication of its own** and holds an API key. Anyone who
+can reach its port drives every desktop session that key can reach, with no
+further credentials. Do not bind it to `0.0.0.0`, and do not put it behind a
+plain reverse proxy without adding authentication in front.
 
 It is a local operator tool. It is not the multi-user console — that is `webui/`.
+
+### Why loopback binding is not enough on its own
+
+Binding `127.0.0.1` keeps other *hosts* out. It does nothing about the browser
+already running on this machine: **WebSocket handshakes are exempt from the
+same-origin policy** — no preflight, no CORS — so any page on any site the
+operator visits could otherwise open
+
+```
+ws://127.0.0.1:6080/websockify?session=desk-1
+```
+
+and this process would attach the API key on its behalf, handing that page a
+live RFB channel with keyboard and mouse. Session ids need no guessing; this
+README uses `desk-1`.
+
+So the bridge checks `Origin` against an allowlist, and `Host` as well — a page
+on a name that has been DNS-rebound to `127.0.0.1` is same-origin to the browser
+and therefore sends no `Origin` at all, but its `Host` header still carries the
+attacker's name. Both checks cover `/api/*` too, or a cross-site form post could
+boot VMs. A request with no `Origin` at all is allowed: that is a non-browser
+client such as `curl`, which is not this threat — the attack needs a victim's
+browser.
+
+Override the allowlist with `VIEWER_ALLOWED_ORIGINS` (comma-separated) if you
+front the viewer with something else.
+
+`npm test` covers all of this; run it after touching `server.mjs`.
 
 ## Requirements
 

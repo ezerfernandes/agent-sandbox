@@ -334,6 +334,9 @@ describe("Exec REST Routes (/exec/*)", () => {
 
       expect(res.status).toBe(200);
       const [session] = res.body.sessions;
+      // This shape is mirrored by `SessionInfo` in sdk/typescript/src/types.ts,
+      // which casts the response without validating it — a field renamed here
+      // and not there is silently `undefined` for every SDK caller. Change both.
       expect(session).toEqual({
         sessionId: "sess-1",
         createdAt: expect.any(Number),

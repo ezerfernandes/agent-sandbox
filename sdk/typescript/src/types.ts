@@ -101,13 +101,24 @@ export interface Template {
   tools: string[];
 }
 
-/** Session info */
+/**
+ * Session info, as returned by `GET /exec/`.
+ *
+ * These names are the wire format, not a nicer spelling of it: `client.sessions()`
+ * casts the response to this type without validating it, so a field named
+ * anything else is simply `undefined` at runtime. This interface previously
+ * declared `id`, `lastActivity` and `templateName`, none of which the server has
+ * ever sent.
+ */
 export interface SessionInfo {
-  id: string;
-  state: string;
+  sessionId: string;
+  ownerId?: string;
   createdAt: number;
-  lastActivity: number;
-  templateName?: string;
+  lastActivityAt: number;
+  state: "creating" | "active" | "destroying";
+  template?: string;
+  /** Present once a microVM is attached; absent while the session is still creating. */
+  vm?: { id: string; state: string };
 }
 
 /** Error thrown by the SDK*/

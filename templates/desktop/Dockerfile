@@ -16,6 +16,9 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
 # tigervnc supplies Xvnc; xdpyinfo is how the boot hook knows the display is
 # actually accepting connections; xdotool and scrot are the agent's hands and
 # eyes. chromium-swiftshader provides software GL, since the microVM has no GPU.
+# libwebp-tools supplies cwebp: scrot only writes PNG, and a full-screen capture
+# re-encodes to roughly a third the size, which matters when every frame crosses
+# vsock as base64 inside a JSON body.
 RUN apk add --no-cache \
       tigervnc \
       xdpyinfo \
@@ -23,6 +26,7 @@ RUN apk add --no-cache \
       openbox \
       xdotool \
       scrot \
+      libwebp-tools \
       npm \
       chromium \
       chromium-swiftshader \

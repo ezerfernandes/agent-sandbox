@@ -1,0 +1,254 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Box Desktop Control (agent-sandbox adapter)",
+    "version": "1.0.0",
+    "description": "Desktop-control gestures backed by an agent-sandbox `desktop` session. Each operation becomes one call to the sandbox's /exec API, executed by xdotool and scrot inside the guest microVM.\n\nDifferences from the reference schema, all deliberate:\n\n- **Sessions.** The reference schema is stateless; every sandbox call needs a session id. Resolved most-explicit-first: a `/desktop/{sessionId}` path prefix, then an `X-Sandbox-Session` header, then the DESKTOP_SESSION default. The bare paths below behave exactly as the reference schema describes.\n- **Coordinate bounds.** Validated against the session's real display, queried at runtime, not a fixed 1279x799. DESKTOP_GEOMETRY is a per-template setting.\n- **Screenshot format.** WebP when the guest has an encoder, PNG otherwise, negotiated with Accept. A PNG fallback carries `X-Adapter-Format-Note`.\n- **Scroll.** X11 scrolling is discrete notches, not pixels, so `deltaY` is divided by SCROLL_PIXELS_PER_NOTCH and rounded. Any nonzero delta becomes at least one notch.\n- **Failures.** A gesture that ran but failed inside the guest answers 502 with a message, rather than 204."
+  },
+  "servers": [
+    { "url": "http://127.0.0.1:6100", "description": "adapter, loopback only — reach it over an SSH tunnel" }
+  ],
+  "components": {
+    "parameters": {
+      "SessionHeader": {
+        "name": "X-Sandbox-Session",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+        "description": "Session to act on. Defaults to the adapter's DESKTOP_SESSION."
+      }
+    },
+    "schemas": {
+      "Point": {
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "integer", "minimum": 0, "description": "Bounded by the session's display width, exclusive." },
+          "y": { "type": "integer", "minimum": 0, "description": "Bounded by the session's display height, exclusive." }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed body, or a coordinate outside the session's display",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "GuestFailure": {
+        "description": "The command reached the guest and failed there",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    }
+  },
+  "paths": {
+    "/screenshot": {
+      "post": {
+        "summary": "Capture the current desktop (read-only)",
+        "operationId": "screenshot",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "responses": {
+          "200": {
+            "description": "Image of the guest's display. WebP when the guest can encode it, otherwise PNG.",
+            "headers": {
+              "X-Adapter-Format-Note": {
+                "schema": { "type": "string" },
+                "description": "Present only when PNG was returned because the guest has no webp encoder."
+              }
+            },
+            "content": {
+              "image/webp": { "schema": { "type": "string", "format": "binary" } },
+              "image/png": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/mouse/move": {
+      "post": {
+        "summary": "Move pointer",
+        "operationId": "mouseMove",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Point" } } }
+        },
+        "responses": {
+          "204": { "description": "Moved" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/mouse/click": {
+      "post": {
+        "summary": "Click (optional press-and-hold)",
+        "operationId": "mouseClick",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/Point" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "button": { "type": "string", "enum": ["left", "right", "middle"], "default": "left" },
+                      "holdDurationMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 60000,
+                        "description": "Hold for I'm-human / long-press widgets. Press, sleep and release are chained in one xdotool invocation so they cannot race."
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Clicked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/mouse/scroll": {
+      "post": {
+        "summary": "Scroll at a point",
+        "operationId": "mouseScroll",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/Point" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "deltaX": { "type": "integer", "default": 0, "description": "Positive = right. Mapped to buttons 6/7, which some toolkits ignore." },
+                      "deltaY": { "type": "integer", "description": "Positive = down, negative = up. Converted to wheel notches; the conversion is lossy." }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Scrolled" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/keyboard/type": {
+      "post": {
+        "summary": "Type text into the focused field",
+        "operationId": "keyboardType",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "Passed to xdotool as a single argv element, never through a shell, so no character in it is interpreted."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Typed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/keyboard/key": {
+      "post": {
+        "summary": "Press a key or chord",
+        "operationId": "keyboardKey",
+        "parameters": [{ "$ref": "#/components/parameters/SessionHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["key"],
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_]{1,32}$",
+                    "description": "An X keysym name.",
+                    "examples": ["Enter", "Escape", "Tab", "BackSpace", "Page_Down"]
+                  },
+                  "modifiers": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["ctrl", "alt", "shift", "meta"] },
+                    "description": "`meta` is sent as X's `super`."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Key sent" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/GuestFailure" }
+        }
+      }
+    },
+    "/wait": {
+      "post": {
+        "summary": "Wait for UI to settle",
+        "operationId": "wait",
+        "description": "Waits in the adapter, not the guest. Sending it to the guest would hold that session's command lock for the duration, blocking the screenshot the caller is waiting to take.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "ms": { "type": "integer", "minimum": 0, "maximum": 30000 } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Waited" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/healthz": {
+      "post": {
+        "summary": "Adapter liveness and configuration",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Which sandbox and default session this adapter is bound to",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    }
+  }
+}

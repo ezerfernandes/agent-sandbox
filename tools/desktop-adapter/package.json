@@ -1,0 +1,11 @@
+{
+  "name": "agent-sandbox-desktop-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Desktop-control gesture API (screenshot, mouse, keyboard) backed by an agent-sandbox desktop session",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  }
+}

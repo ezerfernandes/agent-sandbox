@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-sandbox console</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="dot" id="linkDot" aria-hidden="true"></span>
+    <span class="name">agent&#8209;sandbox</span>
+    <span class="sub" id="sandboxUrl">console</span>
+  </div>
+
+  <div class="session-controls">
+    <label for="sessionId" class="lbl">session</label>
+    <input id="sessionId" value="desk-1" spellcheck="false" autocomplete="off" size="12">
+
+    <label for="template" class="lbl">template</label>
+    <select id="template">
+      <option value="desktop">desktop</option>
+      <option value="browser">browser</option>
+      <option value="node">node</option>
+    </select>
+
+    <button id="btnBoot" class="btn">Boot</button>
+    <button id="btnConnect" class="btn primary">Connect</button>
+    <button id="btnDisconnect" class="btn" disabled>Disconnect</button>
+    <button id="btnDestroy" class="btn danger">Destroy</button>
+  </div>
+
+  <div class="status" id="status">
+    <span class="pill" id="vmPill">no session</span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <section class="screen-pane">
+    <div class="pane-head">
+      <h2>Guest desktop</h2>
+      <div class="head-right">
+        <label class="check"><input type="checkbox" id="scaleFit" checked> scale to fit</label>
+        <span class="meta" id="screenMeta">not connected</span>
+      </div>
+    </div>
+    <div id="screen" class="screen"></div>
+    <div class="screen-empty" id="screenEmpty">
+      <p class="big">No desktop attached</p>
+      <p>Boot a <code>desktop</code> session and press <strong>Connect</strong>. The <code>browser</code> and <code>node</code> templates have no X server, so nothing renders here &mdash; that is by design, not a failure.</p>
+    </div>
+  </section>
+
+  <section class="side-pane">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="agent" id="tab-agent">Agent</button>
+      <button class="tab" role="tab" data-tab="shell" id="tab-shell">Shell</button>
+      <button class="tab" role="tab" data-tab="files" id="tab-files">Files</button>
+    </nav>
+
+    <!-- Agent ------------------------------------------------------------ -->
+    <div class="panel active" id="panel-agent" role="tabpanel" aria-labelledby="tab-agent">
+      <p class="panel-intro">
+        A driver running <em>outside</em> the microVM, using only the public API &mdash; the
+        position a real agent occupies. Each step is a live call; watch the desktop
+        react as it goes.
+      </p>
+
+      <div class="task-list" id="taskList"></div>
+
+      <div class="run-log" id="agentLog">
+        <p class="hint">Pick a task to run it.</p>
+      </div>
+    </div>
+
+    <!-- Shell ------------------------------------------------------------ -->
+    <div class="panel" id="panel-shell" role="tabpanel" aria-labelledby="tab-shell">
+      <p class="panel-intro">
+        Commands run as argv, not a shell line &mdash; so this box wraps whatever you
+        type in <code>sh -c</code>, which is what the API expects for shell syntax.
+      </p>
+
+      <form class="cmd-form" id="cmdForm">
+        <input id="cmdInput" placeholder="uname -sr; free -m | head -2" spellcheck="false" autocomplete="off">
+        <button class="btn primary" id="btnRun" type="submit">Run</button>
+        <button class="btn" id="btnCancel" type="button" disabled>Cancel</button>
+      </form>
+
+      <div class="quick" id="quickCmds"></div>
+      <pre class="term" id="term">Output appears here as the guest produces it.</pre>
+    </div>
+
+    <!-- Files ------------------------------------------------------------ -->
+    <div class="panel" id="panel-files" role="tabpanel" aria-labelledby="tab-files">
+      <p class="panel-intro">
+        <code>/workspace</code> and <code>/tmp</code> are tmpfs; the root filesystem is
+        read-only. Everything here dies with the session.
+      </p>
+      <form class="cmd-form" id="fileForm">
+        <input id="filePath" value="/workspace" spellcheck="false" autocomplete="off">
+        <button class="btn" type="submit">List</button>
+      </form>
+      <div class="file-list" id="fileList"><p class="hint">Press List.</p></div>
+      <div class="file-preview" id="filePreview"></div>
+    </div>
+  </section>
+
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

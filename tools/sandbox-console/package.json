@@ -1,0 +1,15 @@
+{
+  "name": "agent-sandbox-console",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Operator console for a running agent-sandbox: live desktop, command shell, file browser, and a scripted agent that drives the guest",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.7.0",
+    "ws": "^8.21.3"
+  }
+}
